@@ -21,6 +21,9 @@
     },
     {
       "path": "./packages/knowledge"
+    },
+    {
+      "path": "./packages/eval"
     }
   ]
 }

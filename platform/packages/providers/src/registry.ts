@@ -2,6 +2,7 @@ import { optional, required } from "@platform/env";
 
 import { AnthropicProvider } from "./ai/anthropic.js";
 import { DeterministicEmbeddingProvider } from "./embedding/deterministic.js";
+import { LocalEmbeddingProvider } from "./embedding/local.js";
 import { OpenAIEmbeddingProvider } from "./embedding/openai.js";
 import { ProviderError, type AIProvider, type EmbeddingProvider } from "./types.js";
 
@@ -14,7 +15,7 @@ import { ProviderError, type AIProvider, type EmbeddingProvider } from "./types.
  */
 
 export type AIProviderId = "anthropic";
-export type EmbeddingProviderId = "openai" | "deterministic";
+export type EmbeddingProviderId = "openai" | "local" | "deterministic";
 
 export interface AIProviderOptions {
   provider?: string;
@@ -69,6 +70,12 @@ export function createEmbeddingProvider(
       if (dimensions !== undefined) options.dimensions = dimensions;
       return new OpenAIEmbeddingProvider(options);
     }
+    case "local": {
+      const options: { model?: string; dimensions?: number } = {};
+      if (model !== undefined) options.model = model;
+      if (dimensions !== undefined) options.dimensions = dimensions;
+      return new LocalEmbeddingProvider(options);
+    }
     case "deterministic": {
       const options: { dimensions?: number } = {};
       if (dimensions !== undefined) options.dimensions = dimensions;
@@ -76,7 +83,7 @@ export function createEmbeddingProvider(
     }
     default:
       throw new ProviderError(
-        `Proveedor de embeddings no soportado: ${id}. Implementado: openai, deterministic.`,
+        `Proveedor de embeddings no soportado: ${id}. Implementado: openai, local, deterministic.`,
         id,
         false,
       );
@@ -98,7 +105,7 @@ export function providerStatus(): { label: string; ready: boolean }[] {
     {
       label: `Embeddings (${optional("EMBEDDING_PROVIDER") ?? "openai"})`,
       ready:
-        optional("EMBEDDING_PROVIDER") === "deterministic" ||
+        ["deterministic", "local"].includes(optional("EMBEDDING_PROVIDER") ?? "") ||
         optional("OPENAI_API_KEY") !== undefined,
     },
   ];

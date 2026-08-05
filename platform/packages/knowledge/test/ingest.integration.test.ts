@@ -71,9 +71,7 @@ describe(
       });
 
       await runWithTenant(ctx, () =>
-        withRlsTransaction((tx) =>
-          ingestDocument(
-            tx,
+        ingestDocument(
             {
               tenantId: TENANT,
               bytes: buf(MANUAL),
@@ -81,8 +79,7 @@ describe(
               mimeType: "text/markdown",
               sourceRef: "manual-v1",
             },
-            { embedder },
-          ),
+            { embedder, transaction: withRlsTransaction },
         ),
       );
     });
@@ -152,14 +149,25 @@ describe(
       }
     });
 
-    test("una consulta sin relación no supera el umbral", async () => {
-      // Es la capa 1 del grounding: si nada supera el umbral, el generador
-      // no llega a ver la pregunta.
-      const hits = await search("recetas de cocina tailandesa picante");
-      const mejor = hits[0]?.score ?? 0;
-      assert.ok(
-        !passesThreshold(hits, mejor + 0.001),
-        "una consulta ajena debería quedar por debajo de un umbral exigente",
+    test("el umbral corta antes de generar, sobre la similitud coseno", async () => {
+      // Capa 1 del grounding, probada como MECANISMO. La calidad semántica del
+      // corte se mide en el arnés de evaluación, que usa embeddings reales:
+      // el proveedor determinista es una bolsa de palabras con hash y no
+      // promete ordenación semántica, así que pedirle que separe una consulta
+      // del dominio de una ajena sería pedirle algo que no hace.
+      const hits = await search("plazo para devolver un pedido");
+      const mejor = hits.reduce((max, h) => Math.max(max, h.vectorSimilarity ?? 0), 0);
+
+      assert.ok(mejor > 0, "la rama vectorial no devolvió similitud");
+      assert.equal(
+        passesThreshold(hits, mejor + 0.01),
+        false,
+        "por encima de la mejor similitud debe abstenerse",
+      );
+      assert.equal(
+        passesThreshold(hits, mejor - 0.01),
+        true,
+        "por debajo debe dejar pasar",
       );
     });
 
@@ -169,9 +177,7 @@ describe(
       const antes = await systemPrisma.chunk.count({ where: { tenantId: TENANT } });
 
       const result = await runWithTenant(ctx, () =>
-        withRlsTransaction((tx) =>
-          ingestDocument(
-            tx,
+        ingestDocument(
             {
               tenantId: TENANT,
               bytes: buf(MANUAL),
@@ -179,8 +185,7 @@ describe(
               mimeType: "text/markdown",
               sourceRef: "manual-v1",
             },
-            { embedder },
-          ),
+            { embedder, transaction: withRlsTransaction },
         ),
       );
 
@@ -193,9 +198,7 @@ describe(
       // Si se desactivaran después, habría una ventana en la que el documento
       // respondería con las dos versiones a la vez.
       await runWithTenant(ctx, () =>
-        withRlsTransaction((tx) =>
-          ingestDocument(
-            tx,
+        ingestDocument(
             {
               tenantId: TENANT,
               bytes: buf(MANUAL.replace("30 días naturales", "45 días naturales")),
@@ -203,8 +206,7 @@ describe(
               mimeType: "text/markdown",
               sourceRef: "manual-v1",
             },
-            { embedder },
-          ),
+            { embedder, transaction: withRlsTransaction },
         ),
       );
 

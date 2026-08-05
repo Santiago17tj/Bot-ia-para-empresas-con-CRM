@@ -1,4 +1,6 @@
-import type { Prisma } from "@platform/db";
+import { Prisma } from "@platform/db";
+
+import { columnForDimensions } from "./dimensions.js";
 
 /**
  * Recuperación híbrida (§5.6 / §7.5 del plan): vectorial + léxica, fusionadas
@@ -21,6 +23,18 @@ export interface RetrievalHit {
   matchedBy: ("vector" | "lexical")[];
   vectorRank: number | null;
   lexicalRank: number | null;
+  /**
+   * Similitud coseno con la consulta, de 0 a 1. Solo si entró por la rama
+   * vectorial.
+   *
+   * Es lo que se umbraliza para decidir si hay material suficiente — NO la
+   * puntuación RRF. RRF vale para ordenar: su valor depende solo de k y de la
+   * posición, así que  es el techo de una rama y no dice
+   * NADA sobre si el fragmento se parece a la pregunta. Umbralizarlo exige de
+   * hecho que el resultado aparezca en las dos ramas, y eso descarta cualquier
+   * coincidencia puramente semántica.
+   */
+  vectorSimilarity: number | null;
 }
 
 export interface RetrievalOptions {
@@ -87,14 +101,20 @@ export function fuseRRF(
           matchedBy: [branch],
           vectorRank: branch === "vector" ? rank : null,
           lexicalRank: branch === "lexical" ? rank : null,
+          // rank de la rama vectorial ES la distancia coseno (0 = idéntico).
+          vectorSimilarity: branch === "vector" ? 1 - hit.rank : null,
         });
         return;
       }
 
       existing.score += contribution;
       existing.matchedBy.push(branch);
-      if (branch === "vector") existing.vectorRank = rank;
-      else existing.lexicalRank = rank;
+      if (branch === "vector") {
+        existing.vectorRank = rank;
+        existing.vectorSimilarity = 1 - hit.rank;
+      } else {
+        existing.lexicalRank = rank;
+      }
     });
   };
 
@@ -117,6 +137,12 @@ async function vectorBranch(
 ): Promise<RawHit[]> {
   const literal = `[${opts.queryEmbedding.join(",")}]`;
 
+  // La columna sale de la dimensión de la consulta, igual que en la ingesta.
+  // Es lo que permite que convivan dos proveedores durante una migración: cada
+  // consulta mira solo los vectores de su propio espacio. Comparar vectores de
+  // modelos distintos daría resultados plausibles y equivocados sin fallar.
+  const column = Prisma.raw(`"${columnForDimensions(opts.queryEmbedding.length)}"`);
+
   return tx.$queryRaw<RawHit[]>`
     SELECT c.id,
            c."versionId",
@@ -127,17 +153,17 @@ async function vectorBranch(
            c.breadcrumbs,
            c."pageNumber",
            c."tokenCount",
-           (c.embedding <=> ${literal}::vector) AS rank
+           (c.${column} <=> ${literal}::vector) AS rank
     FROM "chunk" c
     JOIN "documentVersion" v ON v.id = c."versionId"
     JOIN "document" d        ON d.id = v."documentId"
     WHERE c."isActive"
       AND v."isActive"
       AND d."isActive"
-      AND c.embedding IS NOT NULL
+      AND c.${column} IS NOT NULL
       AND (d."effectiveFrom" IS NULL OR d."effectiveFrom" <= now())
       AND (d."expiresAt"     IS NULL OR d."expiresAt"     >  now())
-    ORDER BY c.embedding <=> ${literal}::vector
+    ORDER BY c.${column} <=> ${literal}::vector
     LIMIT ${opts.candidatesPerBranch}
   `;
 }
@@ -217,7 +243,41 @@ export async function hybridSearch(
  * la pregunta no puede inventar la respuesta. Todas las demás capas actúan
  * sobre una generación que ya ocurrió; esta impide que ocurra.
  */
+/**
+ * Umbral por defecto, MEDIDO — no elegido a ojo.
+ *
+ * Calibración sobre multilingual-e5-small con un corpus de atención al cliente
+ * (packages/eval/scripts/calibrate.mjs):
+ *
+ *   respondibles     0,853 – 0,927
+ *   sin respuesta    0,775 – 0,846
+ *   hueco                    0,0075
+ *
+ * Siete milésimas de separación. Ese número es el hallazgo, y dice algo que
+ * conviene no olvidar: **la similitud coseno sola es una señal DÉBIL de
+ * abstención con estos modelos.** Los e5 comprimen todo en una banda alta y
+ * estrecha, así que un umbral afinado al hueco funciona con el conjunto medido
+ * y se rompe con la pregunta siguiente.
+ *
+ * Por eso el valor por defecto es CONSERVADOR: descarta lo que no se parece a
+ * nada (una receta de cocina puntúa 0,77) y deja pasar el resto. Filtra el
+ * disparate, no decide la abstención.
+ *
+ * La abstención de verdad la deciden las capas 4–6: salida estructurada con
+ * citas obligatorias y validación en código. El modelo recibe los fragmentos,
+ * ve que no contestan y devuelve `answered: false`. Subir este umbral para
+ * intentar que haga ese trabajo produce sobreabstención — se calla cosas que
+ * sabe — sin evitar una sola invención.
+ */
+export const DEFAULT_SIMILARITY_THRESHOLD = 0.78;
+
 export function passesThreshold(hits: RetrievalHit[], threshold: number): boolean {
-  const best = hits[0];
-  return best !== undefined && best.score >= threshold;
+  // Se mira el mejor de TODOS, no solo el primero: la fusión puede colocar
+  // arriba un resultado léxico fuerte cuya similitud semántica sea menor que
+  // la de otro más abajo.
+  const best = hits.reduce(
+    (max, hit) => Math.max(max, hit.vectorSimilarity ?? 0),
+    0,
+  );
+  return best >= threshold;
 }

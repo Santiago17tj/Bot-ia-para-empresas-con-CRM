@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.0",
-    "@platform/env": "*"
+    "@platform/env": "*",
+    "@huggingface/transformers": "^3.7.6"
   }
 }

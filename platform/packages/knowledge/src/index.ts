@@ -6,10 +6,12 @@ export {
 } from "./chunking.js";
 export type { Chunk, ChunkInput, ChunkOptions } from "./chunking.js";
 
+export { columnForDimensions, supportedDimensions, EMBEDDING_COLUMNS, UnsupportedDimensionError } from "./dimensions.js";
+
 export { ingestDocument, embedQuery, contentChecksum } from "./ingest.js";
 export type { IngestInput, IngestResult } from "./ingest.js";
 
-export { hybridSearch, fuseRRF, passesThreshold } from "./retrieval.js";
+export { hybridSearch, fuseRRF, passesThreshold, DEFAULT_SIMILARITY_THRESHOLD } from "./retrieval.js";
 export type { RetrievalHit, RetrievalOptions } from "./retrieval.js";
 
 export {

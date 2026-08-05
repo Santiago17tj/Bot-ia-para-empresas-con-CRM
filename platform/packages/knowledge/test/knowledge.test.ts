@@ -156,7 +156,11 @@ test("dos ramas vacías no producen resultados ni error", () => {
 // Umbral — capa 1 del grounding
 // ---------------------------------------------------------------------------
 
-function retrieved(id: string, content: string, score = 1): RetrievalHit {
+function retrieved(
+  id: string,
+  content: string,
+  similarity: number | null = 0.9,
+): RetrievalHit {
   return {
     chunkId: id,
     documentId: `d-${id}`,
@@ -167,22 +171,36 @@ function retrieved(id: string, content: string, score = 1): RetrievalHit {
     breadcrumbs: [],
     pageNumber: null,
     tokenCount: 10,
-    score,
-    matchedBy: ["vector"],
-    vectorRank: 1,
-    lexicalRank: null,
+    score: 0.016,
+    matchedBy: similarity === null ? ["lexical"] : ["vector"],
+    vectorRank: similarity === null ? null : 1,
+    lexicalRank: similarity === null ? 1 : null,
+    vectorSimilarity: similarity,
   };
 }
 
 test("sin resultados no se invoca al generador", () => {
-  // Es la capa más fuerte de las seis: un modelo que no ve la pregunta no puede
-  // inventar la respuesta.
-  assert.equal(passesThreshold([], 0.01), false);
+  assert.equal(passesThreshold([], 0.5), false);
 });
 
-test("por debajo del umbral no se invoca al generador", () => {
-  assert.equal(passesThreshold([retrieved("a", "x", 0.005)], 0.01), false);
-  assert.equal(passesThreshold([retrieved("a", "x", 0.02)], 0.01), true);
+test("el umbral mira la similitud coseno, no la puntuación RRF", () => {
+  // RRF vale para ORDENAR: su valor depende solo de k y la posición, así que
+  // 1/(60+1)=0,0164 es el techo de una rama y no dice nada sobre parecido.
+  // Umbralizarlo exigía de facto aparecer en las dos ramas, y eso descartaba
+  // toda coincidencia puramente semántica — medido: 83% de sobreabstención.
+  assert.equal(passesThreshold([retrieved("a", "x", 0.60)], 0.78), false);
+  assert.equal(passesThreshold([retrieved("a", "x", 0.85)], 0.78), true);
+});
+
+test("se mira el mejor de todos, no solo el primero de la fusión", () => {
+  // La fusión puede colocar arriba un resultado léxico fuerte cuya similitud
+  // semántica sea menor que la de otro más abajo.
+  const hits = [retrieved("lexico", "x", null), retrieved("semantico", "y", 0.9)];
+  assert.equal(passesThreshold(hits, 0.78), true);
+});
+
+test("un resultado sin rama vectorial no aporta similitud", () => {
+  assert.equal(passesThreshold([retrieved("solo-lexico", "x", null)], 0.78), false);
 });
 
 // ---------------------------------------------------------------------------

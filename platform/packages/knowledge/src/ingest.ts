@@ -5,6 +5,7 @@ import type { EmbeddingProvider } from "@platform/providers";
 
 import { chunkDocument, type Chunk, type ChunkOptions } from "./chunking.js";
 import { toMarkdown } from "./convert/index.js";
+import { columnForDimensions } from "./dimensions.js";
 
 /**
  * Pipeline de ingesta: convertir → trocear → embeber → indexar.
@@ -62,21 +63,150 @@ export function contentChecksum(markdown: string): string {
   return createHash("sha256").update(markdown.trim()).digest("hex");
 }
 
+/**
+ * Ingesta completa, en TRES fases.
+ *
+ * Las fases existen por una razón concreta: **el trabajo lento no puede vivir
+ * dentro de una transacción**. Embeber es una llamada de red (o una carga de
+ * modelo) que puede tardar segundos o minutos; hacerlo con una transacción
+ * abierta la mantiene bloqueando una conexión del pool todo ese tiempo, y con
+ * un PDF grande simplemente expira.
+ *
+ *   1. Convertir y trocear — sin base de datos
+ *   2. Transacción corta: ¿ya está este contenido indexado?
+ *   3. Embeber — FUERA de transacción, es lo lento
+ *   4. Transacción de escritura: versión y fragmentos
+ *
+ * El orden importa además por dinero: la fase 2 evita pagar los embeddings de
+ * un documento que no ha cambiado.
+ */
 export async function ingestDocument(
-  tx: PrismaNS.TransactionClient,
   input: IngestInput,
-  deps: { embedder: EmbeddingProvider },
+  deps: {
+    embedder: EmbeddingProvider;
+    /** Normalmente `withRlsTransaction`. Se inyecta para poder testear. */
+    transaction: <T>(fn: (tx: PrismaNS.TransactionClient) => Promise<T>) => Promise<T>;
+  },
 ): Promise<IngestResult> {
+  // --- Fase 1: conversión y troceado, sin tocar la base --------------------
   const conversion = await toMarkdown(input.bytes, input.filename, input.mimeType);
   const checksum = contentChecksum(conversion.markdown);
   const language = conversion.language ?? "es";
   const title = input.title ?? conversion.title ?? input.filename;
+  const chunks = chunkDocument(conversion.markdown, input.chunkOptions);
 
-  // --- Documento: se reutiliza si ya existe uno con la misma referencia -----
+  // Falla antes de embeber si la dimensión no tiene columna: descubrirlo
+  // después habría gastado la llamada al proveedor para nada.
+  columnForDimensions(deps.embedder.dimensions);
+
+  // --- Fase 2: ¿hace falta trabajar? ---------------------------------------
+  const state = await deps.transaction((tx) =>
+    resolveState(tx, input, { title, checksum }),
+  );
+
+  if (state.unchanged) {
+    return {
+      documentId: state.documentId,
+      versionId: state.versionId,
+      version: state.version,
+      chunksCreated: 0,
+      unchanged: true,
+      warnings: conversion.warnings,
+      embeddingProvider: deps.embedder.id,
+      embeddingDimensions: deps.embedder.dimensions,
+    };
+  }
+
+  // --- Fase 3: embeber, FUERA de transacción -------------------------------
+  const embeddings = chunks.length > 0 ? await embedInBatches(deps.embedder, chunks) : [];
+
+  // --- Fase 4: escritura, transacción corta --------------------------------
+  return deps.transaction(async (tx) => {
+    const previous = await tx.documentVersion.findFirst({
+      where: { documentId: state.documentId },
+      orderBy: { version: "desc" },
+      select: { id: true, version: true },
+    });
+
+    if (previous !== null) {
+      await tx.documentVersion.update({
+        where: { id: previous.id },
+        data: { isActive: false, supersededAt: new Date() },
+      });
+      // Los fragmentos de la versión anterior dejan de recuperarse en el mismo
+      // acto. Si se desactivaran después, habría una ventana en la que el
+      // documento respondería con las dos versiones a la vez.
+      await tx.chunk.updateMany({
+        where: { versionId: previous.id },
+        data: { isActive: false },
+      });
+    }
+
+    const version = await tx.documentVersion.create({
+      data: {
+        tenantId: input.tenantId,
+        documentId: state.documentId,
+        version: (previous?.version ?? 0) + 1,
+        checksum,
+        byteSize: input.bytes.byteLength,
+        language,
+        rawText: conversion.markdown,
+        ...(conversion.pageCount !== undefined ? { pageCount: conversion.pageCount } : {}),
+        ingestedAt: new Date(),
+      },
+      select: { id: true, version: true },
+    });
+
+    if (chunks.length > 0) {
+      await insertChunks(tx, {
+        tenantId: input.tenantId,
+        versionId: version.id,
+        chunks,
+        embeddings,
+        embedder: deps.embedder,
+        language,
+        title,
+        category: input.category,
+        tags: input.tags ?? [],
+        department: input.department,
+      });
+    }
+
+    await tx.document.update({
+      where: { id: state.documentId },
+      data: { status: "READY", statusError: null },
+    });
+
+    return {
+      documentId: state.documentId,
+      versionId: version.id,
+      version: version.version,
+      chunksCreated: chunks.length,
+      unchanged: false,
+      warnings: conversion.warnings,
+      embeddingProvider: deps.embedder.id,
+      embeddingDimensions: deps.embedder.dimensions,
+    };
+  });
+}
+
+interface ResolvedState {
+  documentId: string;
+  versionId: string | null;
+  version: number;
+  unchanged: boolean;
+}
+
+/** Fase 2: localiza o crea el documento y decide si el contenido ya está. */
+async function resolveState(
+  tx: PrismaNS.TransactionClient,
+  input: IngestInput,
+  args: { title: string; checksum: string },
+): Promise<ResolvedState> {
   const existing = await tx.document.findFirst({
     where: input.sourceRef !== undefined
       ? { sourceRef: input.sourceRef }
-      : { title, sourceId: input.sourceId ?? null },
+      : { title: args.title, sourceId: input.sourceId ?? null },
     select: { id: true },
   });
 
@@ -85,7 +215,7 @@ export async function ingestDocument(
     (await tx.document.create({
       data: {
         tenantId: input.tenantId,
-        title,
+        title: args.title,
         kind: kindFor(input.filename, input.mimeType),
         mimeType: input.mimeType ?? null,
         sourceRef: input.sourceRef ?? null,
@@ -97,10 +227,10 @@ export async function ingestDocument(
       select: { id: true },
     }));
 
-  // --- ¿Contenido ya indexado? --------------------------------------------
-  // Nada se borra: si el checksum coincide, la versión activa ya es esta.
+  // Nada se borra: si el checksum coincide, la versión activa ya es esta y no
+  // hay que volver a pagar los embeddings.
   const sameContent = await tx.documentVersion.findFirst({
-    where: { documentId: document.id, checksum, isActive: true },
+    where: { documentId: document.id, checksum: args.checksum, isActive: true },
     select: { id: true, version: true },
   });
 
@@ -113,84 +243,11 @@ export async function ingestDocument(
       documentId: document.id,
       versionId: sameContent.id,
       version: sameContent.version,
-      chunksCreated: 0,
       unchanged: true,
-      warnings: conversion.warnings,
-      embeddingProvider: deps.embedder.id,
-      embeddingDimensions: deps.embedder.dimensions,
     };
   }
 
-  // --- Nueva versión: la anterior se desactiva, no se borra ----------------
-  const previous = await tx.documentVersion.findFirst({
-    where: { documentId: document.id },
-    orderBy: { version: "desc" },
-    select: { id: true, version: true },
-  });
-
-  if (previous !== null) {
-    await tx.documentVersion.update({
-      where: { id: previous.id },
-      data: { isActive: false, supersededAt: new Date() },
-    });
-    // Los fragmentos de la versión anterior dejan de recuperarse en el mismo
-    // acto. Si se desactivaran después, habría una ventana en la que el
-    // documento respondería con las dos versiones a la vez.
-    await tx.chunk.updateMany({
-      where: { versionId: previous.id },
-      data: { isActive: false },
-    });
-  }
-
-  const version = await tx.documentVersion.create({
-    data: {
-      tenantId: input.tenantId,
-      documentId: document.id,
-      version: (previous?.version ?? 0) + 1,
-      checksum,
-      byteSize: input.bytes.byteLength,
-      language,
-      rawText: conversion.markdown,
-      ...(conversion.pageCount !== undefined ? { pageCount: conversion.pageCount } : {}),
-      ingestedAt: new Date(),
-    },
-    select: { id: true, version: true },
-  });
-
-  // --- Trocear y embeber ---------------------------------------------------
-  const chunks = chunkDocument(conversion.markdown, input.chunkOptions);
-
-  if (chunks.length > 0) {
-    const embeddings = await embedInBatches(deps.embedder, chunks);
-    await insertChunks(tx, {
-      tenantId: input.tenantId,
-      versionId: version.id,
-      chunks,
-      embeddings,
-      embedder: deps.embedder,
-      language,
-      title,
-      category: input.category,
-      tags: input.tags ?? [],
-      department: input.department,
-    });
-  }
-
-  await tx.document.update({
-    where: { id: document.id },
-    data: { status: "READY", statusError: null },
-  });
-
-  return {
-    documentId: document.id,
-    versionId: version.id,
-    version: version.version,
-    chunksCreated: chunks.length,
-    unchanged: false,
-    warnings: conversion.warnings,
-    embeddingProvider: deps.embedder.id,
-    embeddingDimensions: deps.embedder.dimensions,
-  };
+  return { documentId: document.id, versionId: null, version: 0, unchanged: false };
 }
 
 /**
@@ -252,6 +309,9 @@ async function insertChunks(
   },
 ): Promise<void> {
   const config = tsConfig(args.language);
+  // Falla ANTES de embeber si la dimensión no tiene columna: descubrirlo
+  // después habría gastado la llamada al proveedor para nada.
+  const column = columnForDimensions(args.embedder.dimensions);
 
   const rows = args.chunks.map((chunk, i) => {
     const vector = args.embeddings[i];
@@ -284,13 +344,16 @@ async function insertChunks(
     )`;
   });
 
+  // El nombre de columna no puede ir como parámetro, así que se interpola —
+  // pero sale de `columnForDimensions`, que solo devuelve valores de una tabla
+  // cerrada en el código. Nada de aquí procede de entrada del usuario.
   await tx.$executeRaw`
     INSERT INTO "chunk" (
       id, "tenantId", "versionId", ordinal, content, "tokenCount",
       title, language, category, tags, department, breadcrumbs,
       "pageNumber", "sectionPath",
       "embeddingProvider", "embeddingModel", "embeddingDimensions",
-      embedding, search_vector, "isActive", "createdAt"
+      ${Prisma.raw(`"${column}"`)}, search_vector, "isActive", "createdAt"
     )
     VALUES ${Prisma.join(rows)}
   `;
