@@ -15,6 +15,12 @@
     },
     {
       "path": "./packages/observability"
+    },
+    {
+      "path": "./packages/context"
+    },
+    {
+      "path": "./packages/knowledge"
     }
   ]
 }

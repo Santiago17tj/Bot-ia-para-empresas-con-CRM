@@ -162,6 +162,22 @@ export const SLOT_SHARE: Partial<Record<BudgetSlot, number>> = {
   dnaVoice: 0.05,
 };
 
+/**
+ * Suelos garantizados, por encima del reparto porcentual.
+ *
+ * Las reglas de negocio son prioridad 3 pero solo tienen un 10% de cuota, y con
+ * presupuesto ajustado se caían enteras. Una regla vigente que desaparece
+ * —"envío gratis desde 300 €"— hace que el modelo responda la política ANTERIOR
+ * con total seguridad, y eso no se distingue de una respuesta correcta.
+ *
+ * Las reglas son pocas y cortas por naturaleza (una frase cada una), así que
+ * garantizarles un mínimo es barato. El suelo nunca supera lo que queda: si de
+ * verdad no hay sitio, se declara el recorte como cualquier otro.
+ */
+export const SLOT_FLOOR: Partial<Record<BudgetSlot, number>> = {
+  rules: 600,
+};
+
 export function shareFor(slot: BudgetSlot, remaining: number): number {
   const share = SLOT_SHARE[slot];
   if (share === undefined) {
@@ -170,7 +186,10 @@ export function shareFor(slot: BudgetSlot, remaining: number): number {
         "en SLOT_SHARE; si no lo es, debe estar en UNTRUNCATABLE.",
     );
   }
-  return Math.floor(remaining * share);
+
+  const proportional = Math.floor(remaining * share);
+  const floor = SLOT_FLOOR[slot] ?? 0;
+  return Math.min(Math.max(proportional, floor), Math.max(remaining, 0));
 }
 
 /**
