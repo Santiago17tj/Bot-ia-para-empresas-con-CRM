@@ -1,0 +1,26 @@
+{
+  "name": "@platform/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "node --watch --env-file-if-exists=../../.env dist/index.js",
+    "start": "node dist/index.js",
+    "issue-key": "node --experimental-strip-types scripts/issue-key.ts"
+  },
+  "dependencies": {
+    "@platform/db": "*",
+    "@platform/env": "*",
+    "@platform/events": "*",
+    "@platform/knowledge": "*",
+    "@platform/observability": "*",
+    "@platform/providers": "*",
+    "fastify": "^5.2.0"
+  }
+}

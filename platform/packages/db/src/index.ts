@@ -18,6 +18,9 @@ export {
 } from "./tenant.js";
 export type { TenantContext } from "./tenant.js";
 
+export { findApiKeyByHash, touchApiKey } from "./api-key.js";
+export type { ApiKeyRecord } from "./api-key.js";
+
 export {
   TENANT_SCOPED_MODELS,
   GLOBAL_MODELS,

@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 162 tests
+npm test               # 176 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -52,7 +52,7 @@ el diálogo "Continue" funciona.
 
 ## Estado
 
-**Fase 0 completa. Fase 1 al 98%: solo falta `apps/api` y los conversores.**
+**Fase 0 completa. Fase 1 cerrada salvo los conversores PDF/DOCX.**
 
 | Paquete | Qué es | Tests |
 |---|---|---|
@@ -64,10 +64,11 @@ el diálogo "Continue" funciona.
 | `context` | Context Engine, presupuesto, recetas | 22 |
 | `knowledge` | Conversión, troceado, híbrida, grounding, **respuesta** | 45 + 20 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
+| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*` | 14 int. |
 
-El arnés ya corrió en modo `full` contra un generador real y la puerta PASA
-(ver **Estado actual del arnés**). Falta `apps/api` con `/v1/knowledge/search` y
-`/answer`, y los conversores PDF/DOCX.
+El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
+**Estado actual del arnés**). La API sirve `/v1/knowledge/search` y `/answer`,
+verificada de punta a punta contra Groq. Faltan los conversores PDF/DOCX.
 
 ## Invariantes que NO se pueden romper
 
@@ -103,6 +104,18 @@ y **nada** sobre su forma, así que no cuenta como salida estructurada: el model
 devuelve un objeto sin `citations` y el fallo no es ruidoso — es una respuesta
 bien formada y sin fundar. Por eso `capabilities.structuredOutput` es `true`
 solo con `json_schema`.
+
+**El tenant sale de la credencial, nunca de la petición.** Si el `tenantId`
+fuera un campo del cuerpo, bastaría cambiarlo: las políticas RLS obedecen al
+contexto que abre la aplicación, no a la verdad. `findApiKeyByHash` en
+`@platform/db` es la **única** excepción sancionada a "el cliente que se salta
+RLS no aparece en la ruta de una petición" — la tabla `apiKey` lleva `tenantId`
+y política RLS, y el tenant es justo lo que esa consulta averigua. Está
+encapsulada con nombre propio para que se pueda auditar leyendo quién la llama;
+la API nunca importa `systemPrisma`.
+
+Olvidar `withTenant` en una ruta NO filtra datos: la extensión de Prisma falla
+cerrado y la petición muere con un 500. El olvido produce un error ruidoso.
 
 **Lo que no valida no llega al usuario.** Si una cita no aparece literalmente en
 su fragmento, se sirve el mensaje de reserva del tenant, no la respuesta del
@@ -216,11 +229,28 @@ gratuito facture 0: así el informe dice cuánto costaría esa tirada en
 producción, que es la cifra que importa para el producto. La tirada completa
 sale a $0,0043.
 
+## La API
+
+```bash
+npm run dev                                    # arranca en el PORT del .env
+npm run issue-key -w @platform/api -- <tenantId> "nombre" knowledge:read knowledge:answer
+```
+
+`POST /v1/knowledge/search` · `POST /v1/knowledge/answer` · `GET /v1/health`.
+
+La clave se imprime UNA vez: la base solo guarda el hash SHA-256 y los cuatro
+últimos caracteres. SHA-256 y no bcrypt a propósito — son 256 bits aleatorios,
+contra los que una KDF lenta no compra nada y además impediría buscar la fila
+por hash en una consulta indexada.
+
+Las rutas no tienen lógica propia: ensamblan `answerFromKnowledge`, que es lo
+que el arnés mide. Cualquier decisión tomada en la ruta sería una decisión sin
+medir sirviéndose en producción.
+
 ## Próximo paso
 
-`apps/api` con `/v1/knowledge/search` y `/answer`. La lógica ya está entera en
-`packages/knowledge/src/answer.ts` y medida; la API solo la expone. Después, los
-conversores PDF/DOCX, que son los únicos que necesitan librería.
+Conversores PDF/DOCX, los únicos que necesitan librería. Después, `/v1/chat` y
+el resto de la superficie de §27.
 
 Para repetir la medición:
 

@@ -170,7 +170,12 @@ model TenantAIConfig {
 
   // Por debajo de este umbral NO se invoca al generador: capa 1 del grounding.
   // Un modelo que no ve la pregunta no puede inventar la respuesta (§12.2).
-  groundingThreshold Float  @default(0.35)
+  //
+  // 0.78 es el valor CALIBRADO sobre multilingual-e5-small, no una estimación:
+  // ver DEFAULT_SIMILARITY_THRESHOLD en packages/knowledge/src/retrieval.ts. El
+  // valor original de esta columna era 0.35, escrito antes de medir, y con él
+  // pasaba el filtro hasta una receta de cocina (0,77). Migración 004.
+  groundingThreshold Float  @default(0.78)
   fallbackMessage    String @default("No tengo esa información en la documentación de la empresa.")
 
   maxCostPerConversation Float @default(0.5)
@@ -179,9 +184,13 @@ model TenantAIConfig {
   preferredAiProvider String?
   // Cambiar esto NO es un ajuste en caliente: obliga a reindexar el tenant.
   // Se trata como migración, no como preferencia (§25).
-  embeddingProvider   String  @default("openai")
-  embeddingModel      String  @default("text-embedding-3-small")
-  embeddingDimensions Int     @default(1536)
+  // El local es el que está en uso y sobre el que se calibró el umbral de
+  // arriba. Cuando estos valores decían `openai`/1536, un tenant recién creado
+  // nacía con una configuración que no describía el sistema que lo iba a
+  // servir. Migración 004.
+  embeddingProvider   String  @default("local")
+  embeddingModel      String  @default("Xenova/multilingual-e5-small")
+  embeddingDimensions Int     @default(384)
 
   contextTokenBudget Int @default(24000)
 
