@@ -9,7 +9,8 @@
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc --build"
+    "build": "tsc --build",
+    "seed-prompts": "node --experimental-strip-types scripts/seed-prompts.ts"
   },
   "dependencies": {
     "@platform/db": "*",

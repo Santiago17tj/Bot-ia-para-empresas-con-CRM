@@ -22,6 +22,8 @@
     "db:reset": "npm run reset -w @platform/db",
     "build": "tsc --build",
     "typecheck": "tsc --build --force",
+    "prompts:seed": "npm run build && npm run seed-prompts -w @platform/observability",
+    "eval": "npm run build && node --env-file-if-exists=.env packages/eval/scripts/measure.mjs",
     "test": "npm run build && node --env-file-if-exists=.env --test \"packages/*/test/**/*.test.ts\"",
     "test:unit": "npm run build && node --test \"packages/*/test/**/*.test.ts\" --test-skip-pattern=\"integration\"",
     "dev": "npm run dev -w @platform/api"

@@ -9,5 +9,8 @@ export {
 } from "./prompts.js";
 export type { DeploymentCandidate, ResolvedPrompt } from "./prompts.js";
 
+export { seedPrompts, parsePromptFile } from "./seed.js";
+export type { PromptFile, SeedResult } from "./seed.js";
+
 export { recordUsage, usageFromGeneration, utcDay } from "./usage.js";
 export type { UsageEntry, UsageMetric } from "./usage.js";

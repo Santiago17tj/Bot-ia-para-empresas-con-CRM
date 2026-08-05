@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@platform/db": "*",
+    "@platform/observability": "*",
     "@platform/providers": "*",
     "@platform/env": "*"
   }

@@ -1,4 +1,15 @@
-import type { RetrievalHit } from "./retrieval.js";
+/**
+ * Lo mínimo que hace falta para verificar una cita: de qué fragmento dice venir
+ * y qué decía ese fragmento.
+ *
+ * Se pide esto y no un `RetrievalHit` entero porque la validación no necesita
+ * nada más, y un tipo que pide de más obliga a fabricar campos irrelevantes en
+ * cada test que quiera ejercerla.
+ */
+export interface CitableSource {
+  chunkId: string;
+  content: string;
+}
 
 /**
  * Validación de grounding (§12.2, capas 4–6).
@@ -97,7 +108,7 @@ export function normalizeForComparison(text: string): string {
  */
 export function validateGrounding(
   answer: GroundedAnswer,
-  retrieved: RetrievalHit[],
+  retrieved: CitableSource[],
   prohibitions: string[] = [],
 ): ValidationResult {
   const failures: ValidationFailure[] = [];

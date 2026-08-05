@@ -38,8 +38,12 @@ export {
   ANSWER_SCHEMA,
 } from "./grounding.js";
 export type {
+  CitableSource,
   Citation,
   GroundedAnswer,
   ValidationFailure,
   ValidationResult,
 } from "./grounding.js";
+
+export { answerFromKnowledge, renderContext } from "./answer.js";
+export type { AnswerOptions, AnswerResult } from "./answer.js";
