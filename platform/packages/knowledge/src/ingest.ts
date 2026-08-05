@@ -20,6 +20,16 @@ export interface IngestInput {
   bytes: Buffer;
   filename: string;
   mimeType?: string;
+  /**
+   * Ingerir DENTRO de un documento que ya existe.
+   *
+   * Es lo que hace posible la ingesta asíncrona: la API crea la fila en
+   * `PENDING` y responde 202, y el worker que recoge el evento dice
+   * exactamente en cuál trabaja. Sin esto tendría que adivinarlo por título o
+   * por `sourceRef`, y dos ficheros subidos con el mismo nombre se pisarían el
+   * uno al otro sin que nada fallara.
+   */
+  documentId?: string;
   sourceId?: string;
   /** Si no se da, se usa el título detectado o el nombre del fichero. */
   title?: string;
@@ -203,6 +213,32 @@ async function resolveState(
   input: IngestInput,
   args: { title: string; checksum: string },
 ): Promise<ResolvedState> {
+  // Con `documentId` no se busca ni se crea: se exige que exista. Si no está,
+  // se falla en vez de crear otro — un worker que "arregla" un id que no
+  // encuentra creando una fila nueva deja huérfano el documento que el cliente
+  // está consultando por la API, y este se queda en PENDING para siempre.
+  if (input.documentId !== undefined) {
+    const target = await tx.document.findUnique({
+      where: { id: input.documentId },
+      select: { id: true },
+    });
+
+    if (target === null) {
+      throw new Error(
+        `No existe el documento ${input.documentId} para este tenant. ` +
+          "La ingesta con documentId no crea filas: si el documento no está, " +
+          "o se borró o el id viene de otro tenant.",
+      );
+    }
+
+    await tx.document.update({
+      where: { id: target.id },
+      data: { status: "RUNNING", statusError: null },
+    });
+
+    return resolveVersion(tx, target.id, args.checksum);
+  }
+
   const existing = await tx.document.findFirst({
     where: input.sourceRef !== undefined
       ? { sourceRef: input.sourceRef }
@@ -227,27 +263,40 @@ async function resolveState(
       select: { id: true },
     }));
 
-  // Nada se borra: si el checksum coincide, la versión activa ya es esta y no
-  // hay que volver a pagar los embeddings.
+  return resolveVersion(tx, document.id, args.checksum);
+}
+
+/**
+ * ¿Está ya indexado este contenido en este documento?
+ *
+ * Nada se borra: si el checksum coincide con la versión activa, no hay que
+ * volver a pagar los embeddings. Es la fase que ahorra dinero cuando alguien
+ * vuelve a subir el mismo fichero.
+ */
+async function resolveVersion(
+  tx: PrismaNS.TransactionClient,
+  documentId: string,
+  checksum: string,
+): Promise<ResolvedState> {
   const sameContent = await tx.documentVersion.findFirst({
-    where: { documentId: document.id, checksum: args.checksum, isActive: true },
+    where: { documentId, checksum, isActive: true },
     select: { id: true, version: true },
   });
 
   if (sameContent !== null) {
     await tx.document.update({
-      where: { id: document.id },
+      where: { id: documentId },
       data: { status: "READY", statusError: null },
     });
     return {
-      documentId: document.id,
+      documentId,
       versionId: sameContent.id,
       version: sameContent.version,
       unchanged: true,
     };
   }
 
-  return { documentId: document.id, versionId: null, version: 0, unchanged: false };
+  return { documentId, versionId: null, version: 0, unchanged: false };
 }
 
 /**

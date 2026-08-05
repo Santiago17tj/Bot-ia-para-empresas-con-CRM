@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 
-import { runWithTenant, type TenantContext } from "@platform/db";
+import { runWithTenant, withRlsTransaction, type TenantContext } from "@platform/db";
 
 import {
   authenticate,
@@ -12,6 +12,7 @@ import {
 } from "./auth.js";
 import { ApiError, toErrorResponse } from "./errors.js";
 import { RateLimiter } from "./rate-limit.js";
+import { registerDocumentRoutes } from "./routes/documents.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerKnowledgeRoutes } from "./routes/knowledge.js";
 
@@ -124,6 +125,7 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
     });
 
     await scope.register(registerKnowledgeRoutes);
+    await scope.register(registerDocumentRoutes);
   });
 
   return app;
@@ -144,5 +146,45 @@ export function withTenant<T>(
   ctx: TenantContext,
   fn: () => Promise<T>,
 ): Promise<T> {
-  return runWithTenant(ctx, fn);
+  // El `await` de dentro no sobra: es lo único que hace correcta esta función.
+  //
+  // Las consultas de Prisma son PEREZOSAS. `prisma.document.findMany(...)`
+  // devuelve una promesa que todavía no ha empezado; la consulta sale cuando
+  // alguien la espera. Con `runWithTenant(ctx, fn)` a secas, un manejador que
+  // escriba `withTenant(ctx, () => prisma.document.findMany(...))` construye la
+  // consulta dentro del contexto y la EJECUTA fuera, ya cerrado el
+  // AsyncLocalStorage — y la extensión falla con "sin contexto resuelto".
+  //
+  // Awaitándola aquí dentro, la ejecución arranca dentro del contexto y da
+  // igual si el manejador devolvió una promesa perezosa o una en marcha.
+  //
+  // Se descubrió con un 500, no con una fuga: sin contexto la extensión falla
+  // cerrado. Ese es el diseño funcionando.
+  return runWithTenant(ctx, async () => await fn());
+}
+
+/**
+ * Lee datos del tenant. **La única forma correcta de leer en un manejador.**
+ *
+ * `withTenant` abre el contexto de la aplicación, pero la tercera capa de
+ * aislamiento —las políticas RLS— lee `app.tenant_id` de la SESIÓN de Postgres,
+ * y eso lo fija `withRlsTransaction` de forma local a la transacción. Una
+ * consulta con `prisma` fuera de una transacción tiene contexto de aplicación y
+ * no tiene el de Postgres.
+ *
+ * Y ahí está el filo: no falla. La capa 2 añade su `WHERE tenantId`, la capa 3
+ * no encuentra el ajuste y no deja pasar nada, y el resultado es **cero filas
+ * en silencio**. No es una fuga —el aislamiento aguanta— pero sí un listado
+ * vacío o una configuración que parece no existir y se sustituye por valores
+ * por defecto sin que nadie se entere.
+ *
+ * Se descubrió así: la ruta de respuesta leía `TenantAIConfig` fuera de
+ * transacción, recibía `null` y servía el umbral por defecto del sistema en vez
+ * del del cliente. Todo verde y todo mal.
+ */
+export function readInTenant<T>(
+  ctx: TenantContext,
+  fn: (tx: Parameters<Parameters<typeof withRlsTransaction<T>>[0]>[0]) => Promise<T>,
+): Promise<T> {
+  return withTenant(ctx, () => withRlsTransaction(fn));
 }

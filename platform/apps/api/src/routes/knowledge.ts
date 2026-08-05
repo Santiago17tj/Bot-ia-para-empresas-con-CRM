@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 
-import { prisma, withRlsTransaction } from "@platform/db";
+import { withRlsTransaction, type Prisma } from "@platform/db";
 import {
   answerFromKnowledge,
   embedQuery,
@@ -18,7 +18,7 @@ import {
 } from "@platform/providers";
 
 import { requireScope } from "../auth.js";
-import { withTenant } from "../server.js";
+import { readInTenant, withTenant } from "../server.js";
 
 /**
  * `/v1/knowledge/*` (§27).
@@ -115,7 +115,7 @@ export async function registerKnowledgeRoutes(app: FastifyInstance): Promise<voi
       const { question, limit = 8, categories } = request.body;
       const tenantId = request.tenantCtx.tenantId;
 
-      const policy = await withTenant(request.tenantCtx, () => loadPolicy(tenantId));
+      const policy = await readInTenant(request.tenantCtx, (tx) => loadPolicy(tx, tenantId));
 
       const hits = await withTenant(request.tenantCtx, async () => {
         const queryEmbedding = await embedQuery(getEmbedder(), question);
@@ -206,10 +206,13 @@ interface Policy {
  * sirven los valores por defecto del sistema, y el umbral por defecto es la
  * constante CALIBRADA, no la de la columna — ver la migración 004.
  */
-async function loadPolicy(tenantId: string): Promise<Policy> {
+async function loadPolicy(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+): Promise<Policy> {
   const [config, dna] = await Promise.all([
-    prisma.tenantAIConfig.findUnique({ where: { tenantId } }),
-    prisma.businessDNA.findUnique({ where: { tenantId } }),
+    tx.tenantAIConfig.findUnique({ where: { tenantId } }),
+    tx.businessDNA.findUnique({ where: { tenantId } }),
   ]);
 
   return {

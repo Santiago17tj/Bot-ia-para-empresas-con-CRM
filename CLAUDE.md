@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 176 tests
+npm test               # 199 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -54,6 +54,10 @@ el diálogo "Continue" funciona.
 
 **Fase 0 completa. Fase 1 cerrada salvo los conversores PDF/DOCX.**
 
+El producto ya tiene puerta de entrada: se sube un documento por la API, un
+worker lo indexa y queda respondiendo preguntas. Verificado con los dos
+procesos vivos contra Groq.
+
 | Paquete | Qué es | Tests |
 |---|---|---|
 | `env` | Carga del único `.env` de la raíz | — |
@@ -64,7 +68,9 @@ el diálogo "Continue" funciona.
 | `context` | Context Engine, presupuesto, recetas | 22 |
 | `knowledge` | Conversión, troceado, híbrida, grounding, **respuesta** | 45 + 20 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
+| `storage` | Costura de ficheros + driver local | 15 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*` | 14 int. |
+| `apps/worker` | Despachador del outbox, ingesta asíncrona | 8 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
 **Estado actual del arnés**). La API sirve `/v1/knowledge/search` y `/answer`,
@@ -104,6 +110,22 @@ y **nada** sobre su forma, así que no cuenta como salida estructurada: el model
 devuelve un objeto sin `citations` y el fallo no es ruidoso — es una respuesta
 bien formada y sin fundar. Por eso `capabilities.structuredOutput` es `true`
 solo con `json_schema`.
+
+**Toda lectura de tenant va dentro de `withRlsTransaction`.** Las políticas RLS
+leen `app.tenant_id` de la SESIÓN de Postgres, y eso lo fija esa función de
+forma local a la transacción. Una consulta con `prisma` fuera de transacción
+tiene contexto de aplicación y no tiene el de Postgres — y **no falla**: la capa
+2 añade su `WHERE tenantId`, la capa 3 no deja pasar nada, y salen **cero filas
+en silencio**. No es una fuga, pero sí un listado vacío o un `TenantAIConfig`
+que parece no existir y se sustituye por los valores por defecto del sistema.
+Pasó de verdad: la ruta de respuesta servía el umbral por defecto en vez del del
+cliente, todo verde y todo mal. En la API se usa `readInTenant`, que es la única
+forma correcta de leer en un manejador.
+
+**Las consultas de Prisma son perezosas.** `withTenant` hace `await` de la
+función que recibe, y ese `await` no sobra: `withTenant(ctx, () => prisma.x.findMany())`
+construye la consulta dentro del contexto y la ejecutaría FUERA, con el
+AsyncLocalStorage ya cerrado.
 
 **El tenant sale de la credencial, nunca de la petición.** Si el `tenantId`
 fuera un campo del cuerpo, bastaría cambiarlo: las políticas RLS obedecen al
@@ -247,10 +269,40 @@ Las rutas no tienen lógica propia: ensamblan `answerFromKnowledge`, que es lo
 que el arnés mide. Cualquier decisión tomada en la ruta sería una decisión sin
 medir sirviéndose en producción.
 
+## La ingesta es asíncrona, y no por gusto
+
+`POST /v1/knowledge/documents` guarda los bytes, crea el documento en `PENDING`
+y publica `document.uploaded` **en la misma transacción**, y responde **202**.
+El worker lo recoge, ingiere y lo deja en `READY`; el cliente consulta
+`GET /v1/knowledge/documents/:id`.
+
+Embeber un manual de 200 páginas no cabe en un timeout HTTP, y el pipeline de
+ingesta ya estaba partido en fases justamente porque el trabajo lento no puede
+vivir dentro de una transacción. Servirlo en síncrono habría reintroducido
+arriba el problema que abajo ya estaba resuelto.
+
+Lo que hace correcto ese 202 es que la fila y el evento se confirman juntos. Si
+el evento se publicara fuera de la transacción, un fallo entre ambos dejaría un
+documento en `PENDING` que nadie va a procesar nunca.
+
+```bash
+npm run dev      # API
+npm run worker   # worker, en OTRA terminal
+```
+
+**El worker es un proceso aparte a propósito.** El proveedor de embeddings local
+corre ONNX en CPU y **bloquea el event loop**: durante los tests llegamos a ver
+a Prisma reportar "can't reach database server" con la base perfectamente viva.
+Dentro de la API, ingerir un manual dejaría al servidor sin responder a nadie.
+Es también el motivo de `--test-concurrency=1`: en paralelo, los tests de
+integración se bloquean entre ellos y fallan por algo que no es el código.
+
 ## Próximo paso
 
-Conversores PDF/DOCX, los únicos que necesitan librería. Después, `/v1/chat` y
-el resto de la superficie de §27.
+Conversores PDF/DOCX, los únicos que necesitan librería. El registro
+(`registerConverter`) ya está y la ruta de subida los rechaza hoy con un 415 que
+lo dice. Después, CI —no hay `.github`, así que la puerta del arnés no bloquea
+nada— y el resto de la superficie de §27.
 
 Para repetir la medición:
 

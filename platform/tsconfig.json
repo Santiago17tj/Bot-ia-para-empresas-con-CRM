@@ -20,6 +20,9 @@
       "path": "./packages/context"
     },
     {
+      "path": "./packages/storage"
+    },
+    {
       "path": "./packages/knowledge"
     },
     {
@@ -27,6 +30,9 @@
     },
     {
       "path": "./apps/api"
+    },
+    {
+      "path": "./apps/worker"
     }
   ]
 }
