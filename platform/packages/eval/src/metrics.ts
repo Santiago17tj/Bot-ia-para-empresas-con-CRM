@@ -34,6 +34,15 @@ export interface CaseOutcome {
   cost: number;
   /** Fallos de la validación de grounding, si los hubo. */
   groundingFailures?: string[];
+  /**
+   * Si el material esperado apareció entre lo recuperado.
+   *
+   * Lo calcula el ejecutor comparando `expectedContains` con el CONTENIDO de
+   * los fragmentos, porque los ids de fragmento nacen en la ingesta y un
+   * conjunto de casos no puede declararlos por adelantado. Sin esto, un
+   * conjunto sin `expectedSources` no mide recall y lo reporta como 100%.
+   */
+  sourceFound?: boolean;
 }
 
 export interface Metrics {
@@ -42,8 +51,31 @@ export interface Metrics {
 
   /** De las respondibles: ¿estaba la fuente esperada entre las recuperadas? */
   recallAtK: number;
+  /**
+   * Sobre cuántos casos se pudo calcular `recallAtK`.
+   *
+   * Existe porque cero es un denominador legítimo aquí y el cociente 0/0 tenía
+   * que devolver algo: devolvía 1, y un conjunto que no declaraba fuentes
+   * esperadas informaba "Recall 100%" sin haber medido nada. Un 100% que
+   * significa "no se midió" es peor que un hueco, porque nadie lo investiga.
+   */
+  recallCases: number;
   /** De lo recuperado, cuánto era relevante. */
   precision: number;
+  /** Sobre cuántos casos se pudo calcular `precision`. Ver `recallCases`. */
+  precisionCases: number;
+
+  /**
+   * De las respondibles contestadas: ¿la respuesta decía lo que debía decir?
+   *
+   * Comprueba `expectedContains`, que hasta ahora se declaraba en los casos y
+   * no lo leía nadie. Sin esto, una respuesta fundada, bien citada y
+   * equivocada —el modelo cita el fragmento correcto y luego dice otro número—
+   * contaba como acierto.
+   */
+  wrongAnswerRate: number;
+  /** Qué casos respondieron algo distinto de lo esperado. */
+  wrongAnswers: string[];
 
   /**
    * De las preguntas SIN respuesta en el corpus, ¿en cuántas se abstuvo?
@@ -78,8 +110,23 @@ function percentile(values: number[], p: number): number {
   return sorted[index] as number;
 }
 
+/**
+ * Devuelve 1 con denominador cero, y por eso `recallCases` y `precisionCases`
+ * viajan al lado: sin ellos, "no se pudo medir" y "salió perfecto" son el mismo
+ * número en el informe.
+ */
 function ratio(numerator: number, denominator: number): number {
   return denominator === 0 ? 1 : numerator / denominator;
+}
+
+/** Compara ignorando acentos, mayúsculas y espacios de más, como las citas. */
+function normalize(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function computeMetrics(
@@ -95,19 +142,47 @@ export function computeMetrics(
   // --- Recall: la fuente esperada entre lo recuperado ----------------------
   let recallHits = 0;
   let recallTotal = 0;
+  let precisionCases = 0;
   let precisionNumerator = 0;
   let precisionDenominator = 0;
 
   for (const outcome of answerable) {
     const expected = byId.get(outcome.caseId)?.expectedSources ?? [];
-    if (expected.length === 0) continue;
 
-    recallTotal++;
-    const found = expected.filter((id) => outcome.retrieved.includes(id));
-    if (found.length > 0) recallHits++;
+    if (expected.length > 0) {
+      recallTotal++;
+      const found = expected.filter((id) => outcome.retrieved.includes(id));
+      if (found.length > 0) recallHits++;
 
-    precisionNumerator += found.length;
-    precisionDenominator += outcome.retrieved.length;
+      precisionCases++;
+      precisionNumerator += found.length;
+      precisionDenominator += outcome.retrieved.length;
+      continue;
+    }
+
+    // Sin fuentes declaradas se usa la señal que el ejecutor sí pudo calcular:
+    // si el texto esperado apareció en algún fragmento recuperado. Es recall de
+    // verdad, medido sobre contenido en vez de sobre ids que nadie puede
+    // declarar por adelantado.
+    if (outcome.sourceFound !== undefined) {
+      recallTotal++;
+      if (outcome.sourceFound) recallHits++;
+    }
+  }
+
+  // --- Respuestas que contestan otra cosa ----------------------------------
+  const wrongAnswers: string[] = [];
+  let checkedAnswers = 0;
+
+  for (const outcome of answerable) {
+    const expected = byId.get(outcome.caseId)?.expectedContains ?? [];
+    if (expected.length === 0 || !outcome.answered) continue;
+
+    checkedAnswers++;
+    const response = normalize(outcome.response ?? "");
+    if (!expected.some((term) => response.includes(normalize(term)))) {
+      wrongAnswers.push(outcome.caseId);
+    }
   }
 
   // --- Abstención ----------------------------------------------------------
@@ -146,7 +221,11 @@ export function computeMetrics(
       FORBIDDEN: forbidden.length,
     },
     recallAtK: ratio(recallHits, recallTotal),
+    recallCases: recallTotal,
     precision: ratio(precisionNumerator, precisionDenominator),
+    precisionCases,
+    wrongAnswerRate: checkedAnswers === 0 ? 0 : wrongAnswers.length / checkedAnswers,
+    wrongAnswers,
     correctAbstention: ratio(abstainedWhenShould, unanswerable.length),
     hallucinationRate: ratio(hallucinations, unanswerable.length) === 1 && unanswerable.length === 0
       ? 0
@@ -166,6 +245,13 @@ export interface Thresholds {
   maxHallucinationRate: number;
   maxOverAbstention: number;
   maxGroundingFailureRate: number;
+  /**
+   * Respuestas fundadas y equivocadas. Cero, como las prohibiciones.
+   *
+   * Una respuesta que cita el fragmento correcto y luego dice otro número es
+   * más peligrosa que una alucinación descarada: pasa la validación de citas.
+   */
+  maxWrongAnswerRate: number;
 }
 
 /**
@@ -181,6 +267,7 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   maxHallucinationRate: 0.1,
   maxOverAbstention: 0.25,
   maxGroundingFailureRate: 0.05,
+  maxWrongAnswerRate: 0,
 };
 
 export interface GateResult {
@@ -201,9 +288,18 @@ export function evaluateGate(
   const failures: string[] = [];
   const pct = (v: number): string => `${(v * 100).toFixed(1)}%`;
 
-  if (metrics.recallAtK < thresholds.minRecall) {
+  // Solo se juzga lo que se midió. Aprobar un recall que nadie pudo calcular
+  // sería el mismo fallo que reportarlo como 100%.
+  if (metrics.recallCases > 0 && metrics.recallAtK < thresholds.minRecall) {
     failures.push(
       `Recall ${pct(metrics.recallAtK)} por debajo del mínimo ${pct(thresholds.minRecall)}`,
+    );
+  }
+  if (metrics.wrongAnswerRate > thresholds.maxWrongAnswerRate) {
+    failures.push(
+      `${metrics.wrongAnswers.length} respuesta(s) fundada(s) pero equivocada(s): ` +
+        `${metrics.wrongAnswers.join(", ")}. Citan bien y dicen otra cosa, así ` +
+        "que la validación de citas no las detecta.",
     );
   }
   if (metrics.correctAbstention < thresholds.minCorrectAbstention) {
@@ -256,6 +352,21 @@ export function assessSuiteComposition(cases: EvalCase[]): string[] {
   if (cases.length === 0) {
     warnings.push("El conjunto está vacío.");
     return warnings;
+  }
+
+  const sinEsperado = cases.filter(
+    (c) =>
+      c.kind === "ANSWERABLE" &&
+      (c.expectedContains ?? []).length === 0 &&
+      (c.expectedSources ?? []).length === 0,
+  );
+  if (sinEsperado.length > 0) {
+    warnings.push(
+      `${sinEsperado.length} caso(s) respondible(s) no declaran ni ` +
+        "expectedContains ni expectedSources, así que de ellos solo se sabe si " +
+        "hubo respuesta, no si era correcta: " +
+        sinEsperado.map((c) => c.id).join(", "),
+    );
   }
 
   if (unanswerable === 0) {

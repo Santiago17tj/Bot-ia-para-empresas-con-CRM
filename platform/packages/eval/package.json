@@ -9,7 +9,9 @@
   "scripts": { "build": "tsc --build" },
   "dependencies": {
     "@platform/db": "*",
+    "@platform/env": "*",
     "@platform/knowledge": "*",
+    "@platform/observability": "*",
     "@platform/providers": "*"
   }
 }

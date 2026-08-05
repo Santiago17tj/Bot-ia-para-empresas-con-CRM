@@ -5,7 +5,12 @@ import { runWithTenant, systemPrisma, withRlsTransaction } from "@platform/db";
 import { ingestDocument } from "@platform/knowledge";
 import { LocalEmbeddingProvider } from "@platform/providers";
 
-import { formatReport, runSuite, type EvalCase } from "../dist/index.js";
+import {
+  CUSTOMER_SUPPORT_CASES,
+  CUSTOMER_SUPPORT_CORPUS,
+  formatReport,
+  runSuite,
+} from "../dist/index.js";
 
 /**
  * El conjunto de evaluación, ejercido de verdad.
@@ -13,9 +18,13 @@ import { formatReport, runSuite, type EvalCase } from "../dist/index.js";
  * Usa el proveedor LOCAL: embeddings semánticos reales, sin clave y sin coste.
  * Por primera vez esto mide calidad de recuperación, no solo mecánica.
  *
- * Modo `retrieval`: no se llama a ningún generador. Aun así mide abstención,
- * porque la abstención se decide en el umbral —capa 1 del grounding— antes de
- * que ningún modelo vea la pregunta.
+ * Modo `retrieval`: no se llama a ningún generador, así que mide recall,
+ * precisión y latencia, y **no mide abstención**. Este comentario decía lo
+ * contrario —que la decidía el umbral, capa 1 del grounding— hasta que la
+ * calibración lo desmintió: respondibles 0,853–0,927 frente a 0,775–0,846 de
+ * las que no tienen respuesta. Siete milésimas.
+ *
+ * La abstención la mide `npm run eval`, que corre en modo `full` con generador.
  */
 
 const TENANT = "tnt_eval_suite01";
@@ -27,96 +36,8 @@ const ctx = {
   requestId: "req_eval_test",
 };
 
-const CORPUS = `# Manual de atención al cliente
-
-## Devoluciones
-
-### Plazo de devolución
-El plazo para devolver un pedido es de 30 días naturales desde la fecha de
-entrega. Pasado ese plazo no se admiten devoluciones.
-
-### Estado del producto
-Solo se aceptan devoluciones de productos sin usar, con su embalaje original y
-todas las etiquetas puestas.
-
-## Envíos
-
-### Plazos de entrega
-Los envíos a península tardan entre 24 y 48 horas laborables. Los envíos a
-Baleares y Canarias tardan entre 3 y 5 días laborables.
-
-### Gastos de envío
-El envío es gratuito para pedidos superiores a 50 euros. Por debajo de esa
-cantidad, los gastos de envío son de 4,95 euros.
-
-## Garantía
-
-### Cobertura
-Todos los productos tienen dos años de garantía legal contra defectos de
-fabricación desde la fecha de compra.
-`;
-
-const CASES: EvalCase[] = [
-  // --- Respondibles --------------------------------------------------------
-  {
-    id: "plazo-devolucion",
-    kind: "ANSWERABLE",
-    question: "¿Cuántos días tengo para devolver un pedido?",
-    expectedContains: ["30 días"],
-  },
-  {
-    id: "envio-gratis",
-    kind: "ANSWERABLE",
-    question: "¿A partir de qué importe el envío es gratis?",
-    expectedContains: ["50 euros"],
-  },
-  {
-    id: "plazo-canarias",
-    kind: "ANSWERABLE",
-    question: "¿Cuánto tarda un envío a Canarias?",
-    expectedContains: ["3 y 5 días"],
-  },
-  {
-    id: "garantia",
-    kind: "ANSWERABLE",
-    question: "¿Qué garantía tienen los productos?",
-    expectedContains: ["dos años"],
-  },
-  {
-    id: "estado-producto",
-    kind: "ANSWERABLE",
-    question: "¿Puedo devolver algo que ya he usado?",
-    expectedContains: ["sin usar"],
-  },
-  {
-    id: "gastos-envio",
-    kind: "ANSWERABLE",
-    question: "¿Cuánto cuestan los gastos de envío?",
-    expectedContains: ["4,95"],
-  },
-
-  // --- Sin respuesta en el corpus -----------------------------------------
-  // Un tercio del conjunto, según §33. Sin ellas no se mide lo único que
-  // decide si el producto es vendible.
-  {
-    id: "sin-financiacion",
-    kind: "UNANSWERABLE",
-    question: "¿Ofrecéis financiación en 12 meses sin intereses?",
-    notes: "El corpus no menciona financiación en ningún sitio.",
-  },
-  {
-    id: "sin-tiendas",
-    kind: "UNANSWERABLE",
-    question: "¿Cuál es el horario de vuestra tienda física de Valencia?",
-    notes: "No hay tiendas físicas ni horarios en el corpus.",
-  },
-  {
-    id: "sin-tallas",
-    kind: "UNANSWERABLE",
-    question: "¿Qué equivalencia hay entre la talla europea y la americana?",
-    notes: "Caso realista: parece de atención al cliente pero no está cubierto.",
-  },
-];
+const CORPUS = CUSTOMER_SUPPORT_CORPUS;
+const CASES = CUSTOMER_SUPPORT_CASES;
 
 const buf = (s: string): Buffer => Buffer.from(s, "utf8");
 
@@ -234,7 +155,10 @@ describe(
       const report = await runSuite({ tenantId: TENANT, cases: CASES, embedder });
 
       assert.equal(report.metrics.total, CASES.length);
-      assert.equal(report.metrics.byKind.UNANSWERABLE, 3);
+      assert.equal(
+        report.metrics.byKind.UNANSWERABLE,
+        CASES.filter((c) => c.kind === "UNANSWERABLE").length,
+      );
       assert.equal(report.mode, "retrieval");
       assert.equal(report.metrics.totalCost, 0, "el modo retrieval no debe costar");
 

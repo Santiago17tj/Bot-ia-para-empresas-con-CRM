@@ -5,6 +5,7 @@ import {
   embedQuery,
   hybridSearch,
   passesThreshold,
+  type RetrievalHit,
 } from "@platform/knowledge";
 
 import {
@@ -59,17 +60,27 @@ export interface RunOptions {
   limit?: number;
   thresholds?: Thresholds;
   /** Solo en modo `full`. Si falta, se fuerza el modo `retrieval`. */
-  generate?: (
-    question: string,
-    hits: { chunkId: string; content: string }[],
-  ) => Promise<{
-    answered: boolean;
-    response: string;
-    citations: { chunkId: string }[];
-    cost: number;
-    groundingFailures?: string[];
-  }>;
+  generate?: GenerateFn;
+  /**
+   * Quién generó, para el informe.
+   *
+   * Va aparte del propio `generate` porque una cifra de abstención sin el
+   * modelo al lado no es un resultado: no se sabe si mide el pipeline o mide
+   * lo tonto que era el generador de aquel día.
+   */
+  generator?: { provider: string; model: string };
 }
+
+export type GenerateFn = (
+  question: string,
+  hits: RetrievalHit[],
+) => Promise<{
+  answered: boolean;
+  response: string;
+  citations: { chunkId: string }[];
+  cost: number;
+  groundingFailures?: string[];
+}>;
 
 export interface RunReport {
   mode: EvalMode;
@@ -80,6 +91,7 @@ export interface RunReport {
   embeddingProvider: string;
   embeddingModel: string;
   embeddingDimensions: number;
+  generator?: { provider: string; model: string };
 }
 
 export async function runSuite(options: RunOptions): Promise<RunReport> {
@@ -114,6 +126,12 @@ export async function runSuite(options: RunOptions): Promise<RunReport> {
     const retrieved = hits.map((h) => h.chunkId);
     const overThreshold = passesThreshold(hits, threshold);
 
+    // Recall medido sobre CONTENIDO y no sobre ids: los ids de fragmento nacen
+    // en la ingesta, así que un conjunto de casos no puede declararlos por
+    // adelantado y `expectedSources` se queda vacío siempre. Sin esto, recall y
+    // precisión dividen 0 entre 0 y el informe dice 100% sin haber medido nada.
+    const sourceFound = expectedSourceFound(testCase, hits);
+
     // Capa 1 del grounding: si nada supera el umbral, NO se genera. El coste de
     // una abstención es cero, y esa es la propiedad que hace medible el sistema
     // sin gastar.
@@ -125,6 +143,7 @@ export async function runSuite(options: RunOptions): Promise<RunReport> {
         retrieved,
         latencyMs: Math.round(performance.now() - startedAt),
         cost: 0,
+        ...(sourceFound === undefined ? {} : { sourceFound }),
       });
       continue;
     }
@@ -141,14 +160,12 @@ export async function runSuite(options: RunOptions): Promise<RunReport> {
         retrieved,
         latencyMs: Math.round(performance.now() - startedAt),
         cost: 0,
+        ...(sourceFound === undefined ? {} : { sourceFound }),
       });
       continue;
     }
 
-    const generated = await options.generate(
-      testCase.question,
-      hits.map((h) => ({ chunkId: h.chunkId, content: h.content })),
-    );
+    const generated = await options.generate(testCase.question, hits);
 
     outcomes.push({
       caseId: testCase.id,
@@ -159,6 +176,7 @@ export async function runSuite(options: RunOptions): Promise<RunReport> {
       citations: generated.citations,
       latencyMs: Math.round(performance.now() - startedAt),
       cost: generated.cost,
+      ...(sourceFound === undefined ? {} : { sourceFound }),
       ...(generated.groundingFailures !== undefined
         ? { groundingFailures: generated.groundingFailures }
         : {}),
@@ -187,12 +205,47 @@ export async function runSuite(options: RunOptions): Promise<RunReport> {
     embeddingProvider: options.embedder.id,
     embeddingModel: options.embedder.model,
     embeddingDimensions: options.embedder.dimensions,
+    ...(options.generator === undefined ? {} : { generator: options.generator }),
   };
+}
+
+/**
+ * ¿Apareció el texto esperado en algún fragmento recuperado?
+ *
+ * `undefined` cuando el caso no declara nada que buscar — que no es lo mismo
+ * que `false`, y confundirlos es justo el error que esto viene a arreglar: un
+ * caso sin expectativa declarada no debe contar como fallo de recuperación ni
+ * como acierto.
+ */
+function expectedSourceFound(
+  testCase: EvalCase,
+  hits: RetrievalHit[],
+): boolean | undefined {
+  if (testCase.kind !== "ANSWERABLE") return undefined;
+
+  const expected = testCase.expectedContains ?? [];
+  if (expected.length === 0) return undefined;
+
+  const haystack = hits.map((hit) => normalizeText(hit.content)).join("\n");
+  return expected.some((term) => haystack.includes(normalizeText(term)));
+}
+
+function normalizeText(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** Informe legible para consola y CI. */
 export function formatReport(report: RunReport): string {
   const pct = (v: number): string => `${(v * 100).toFixed(1)}%`;
+  // Un porcentaje sobre cero casos no es un porcentaje. Decir "n/a" y cuántos
+  // casos lo midieron es la diferencia entre un informe y un adorno.
+  const measured = (value: number, cases: number): string =>
+    cases === 0 ? "n/a  (ningún caso lo mide)" : `${pct(value)}  (${cases} casos)`;
   const m = report.metrics;
 
   const lines = [
@@ -200,11 +253,14 @@ export function formatReport(report: RunReport): string {
     "══ Conjunto de evaluación ══",
     `Modo:        ${report.mode}${report.mode === "retrieval" ? "  (sin generación: coste cero)" : ""}`,
     `Embeddings:  ${report.embeddingProvider} · ${report.embeddingModel} · ${report.embeddingDimensions}d`,
+    ...(report.generator === undefined
+      ? []
+      : [`Generador:   ${report.generator.provider} · ${report.generator.model}`]),
     `Casos:       ${m.total}  (respondibles ${m.byKind.ANSWERABLE} · sin respuesta ${m.byKind.UNANSWERABLE} · prohibidas ${m.byKind.FORBIDDEN})`,
     "",
     "── Recuperación ──",
-    `  Recall@k              ${pct(m.recallAtK)}`,
-    `  Precision             ${pct(m.precision)}`,
+    `  Recall@k              ${measured(m.recallAtK, m.recallCases)}`,
+    `  Precision             ${measured(m.precision, m.precisionCases)}`,
     "",
     report.mode === "full"
       ? "── Abstención (lo que decide si es vendible) ──"
@@ -214,6 +270,9 @@ export function formatReport(report: RunReport): string {
     `  Sobreabstención       ${pct(m.overAbstention)}`,
     "",
     "── Seguridad y coste ──",
+    `  Respuestas erróneas   ${pct(m.wrongAnswerRate)}${
+      m.wrongAnswers.length === 0 ? "" : `  → ${m.wrongAnswers.join(", ")}`
+    }`,
     `  Violaciones del ADN   ${m.forbiddenViolations}`,
     `  Fallos de citación    ${pct(m.groundingFailureRate)}`,
     `  Latencia p50 / p95    ${m.latencyP50} ms / ${m.latencyP95} ms`,

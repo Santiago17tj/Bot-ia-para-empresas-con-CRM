@@ -24,10 +24,15 @@ cd platform
 npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
-npm test               # 137 tests
+npm run prompts:seed   # carga el catálogo de prompts en el registro
+npm test               # 162 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
+
+`npm run eval` corre la medición completa (recuperación **y** abstención) contra
+Postgres real y un generador real. Necesita el catálogo sembrado; si falta, lo
+dice y explica cómo. Sale con código 1 si la puerta bloquea, para servir en CI.
 
 ### Docker en esta máquina
 
@@ -47,21 +52,22 @@ el diálogo "Continue" funciona.
 
 ## Estado
 
-**Fase 0 completa. Fase 1 al 80%.**
+**Fase 0 completa. Fase 1 al 98%: solo falta `apps/api` y los conversores.**
 
 | Paquete | Qué es | Tests |
 |---|---|---|
 | `env` | Carga del único `.env` de la raíz | — |
 | `db` | 22 modelos, aislamiento 3 capas, RLS | 11 + 9 int. |
-| `providers` | `AIProvider` + `EmbeddingProvider` | 10 |
+| `providers` | `AIProvider` + `EmbeddingProvider`, 2 adaptadores | 23 |
 | `events` | Outbox transaccional + despachador | 11 |
-| `observability` | Trazas, Prompt Registry, consumo | 11 |
+| `observability` | Trazas, Prompt Registry, siembra, consumo | 11 |
 | `context` | Context Engine, presupuesto, recetas | 22 |
-| `knowledge` | Conversión, troceado, híbrida, grounding | 45 + 10 int. |
-| `eval` | Arnés con abstención | 6 int. |
+| `knowledge` | Conversión, troceado, híbrida, grounding, **respuesta** | 45 + 20 int. |
+| `eval` | Arnés con abstención, modo `full` | 6 int. |
 
-Falta: **generador** (para medir abstención de verdad), `apps/api` con
-`/v1/knowledge/search` y `/answer`, y conversores PDF/DOCX.
+El arnés ya corrió en modo `full` contra un generador real y la puerta PASA
+(ver **Estado actual del arnés**). Falta `apps/api` con `/v1/knowledge/search` y
+`/answer`, y los conversores PDF/DOCX.
 
 ## Invariantes que NO se pueden romper
 
@@ -91,6 +97,19 @@ devuelve 400 si recibe `temperature`, y `TenantAIConfig` la expone como ajuste
 del cliente. Reenviarla ciegamente rompería a todos los tenants al cambiar el
 modelo por defecto.
 
+**Sin salida estructurada no se genera.** `answerFromKnowledge` falla al entrar
+si el proveedor no puede exigir un esquema. `json_object` garantiza JSON válido
+y **nada** sobre su forma, así que no cuenta como salida estructurada: el modelo
+devuelve un objeto sin `citations` y el fallo no es ruidoso — es una respuesta
+bien formada y sin fundar. Por eso `capabilities.structuredOutput` es `true`
+solo con `json_schema`.
+
+**Lo que no valida no llega al usuario.** Si una cita no aparece literalmente en
+su fragmento, se sirve el mensaje de reserva del tenant, no la respuesta del
+modelo. Una respuesta con una cita inventada es peor que una abstención porque
+parece fundada. Se distingue en las métricas: `degraded` (el modelo intentó
+inventar y la red aguantó) no es lo mismo que una abstención limpia.
+
 ## Hallazgos medidos — no obvios, costaron descubrirlos
 
 **La similitud coseno no es una señal de abstención.** Medido sobre
@@ -113,37 +132,112 @@ la posición (techo 0,0164 por rama), así que umbralizarlo exige de facto
 aparecer en las dos ramas. Medido: 83% de sobreabstención antes de corregirlo.
 
 **El modo `retrieval` del arnés NO mide abstención.** Mide bien recall,
-precisión y latencia. El código lo dice explícitamente y emite un aviso.
+precisión y latencia. El código lo dice explícitamente y emite un aviso. Para
+abstención hace falta el modo `full`: `npm run eval`.
+
+**En Groq, la salida estructurada es propiedad del MODELO, no del backend.**
+`llama-3.3-70b-versatile` —la elección obvia por tamaño— responde 400 con
+`This model does not support response format json_schema`. Solo la familia
+`openai/gpt-oss` lo acepta; `qwen3.6-27b` tampoco. Por eso el perfil de Groq
+lleva lista blanca y falla cerrado: un modelo desconocido al que se le suponga
+capacidad de exigir citas es el fallo silencioso que este sistema existe para no
+tener. Comprobado contra la API, no leído en una documentación.
+
+**El arnés daba 100% de recall y precisión sin medir nada.** Ningún caso
+declaraba `expectedSources` —no puede: los ids de fragmento nacen en la
+ingesta—, así que ambas métricas dividían 0 entre 0 y `ratio()` devolvía 1. Y
+`expectedContains` estaba declarado en el tipo y **no lo leía nadie**: una
+respuesta bien citada y equivocada contaba como acierto. Corregido: el recall se
+mide sobre el contenido de los fragmentos, la precisión dice `n/a` cuando nadie
+la mide, y hay métrica de respuestas erróneas con umbral cero. Un 100% que
+significa "no se midió" es peor que un hueco, porque nadie lo investiga.
+
+**El `.env` seleccionaba embeddings de OpenAI mientras todo se medía con el
+local.** `EMBEDDING_PROVIDER=openai` con la clave vacía, frente a los 384d de
+`multilingual-e5-small` sobre los que se calibró todo lo de arriba. Los tests no
+lo detectaban porque instancian `LocalEmbeddingProvider` a mano; lo destapó el
+primer script que llamó a `createEmbeddingProvider()`. Corregido en
+`.env.example`. **Si tu `.env` local sigue diciendo `openai`, cámbialo**: con esa
+configuración cualquier código que resuelva el proveedor por registro falla, y
+si llegara a funcionar mediría un sistema distinto del calibrado.
 
 ## Estado actual del arnés
 
+Medición real, modo `full`, contra Postgres y Groq (`openai/gpt-oss-120b`):
+
 ```
-Recall@k              100.0%
-Precision             100.0%
-Abstención correcta     0.0%   ← con umbral solo
-RESULTADO: BLOQUEA
+Recall@k              100.0%  (6 casos)
+Precision             n/a  (ningún caso lo mide)
+Abstención correcta   100.0%   ← 4 casos, incluida la trampa
+Tasa de alucinación     0.0%
+Sobreabstención         0.0%
+Respuestas erróneas     0.0%
+Fallos de citación      0.0%
+Latencia p50 / p95    2083 ms / 14962 ms
+Coste total          $0.0043   (precio de lista; el plan gratuito factura 0)
+RESULTADO: PASA
 ```
 
-**La puerta bloqueando es correcto**, no un fallo: el arnés dice la verdad. La
-recuperación funciona; falta el generador para que las capas 4–6 abstengan.
+**El producto es vendible por esta métrica.** El caso que lo demuestra es
+`sin-plazo-reembolso`: el corpus fija el plazo para DEVOLVER (30 días) y no dice
+nada del plazo de REEMBOLSO. Similitud alta, respuesta inexistente, ningún
+umbral la filtraría. El generador se abstiene.
+
+La latencia p95 de 15 s es de las abstenciones: el modelo razona más cuando
+decide que no puede responder. Es coste bien gastado, pero con streaming habrá
+que enseñar algo mientras tanto.
+
+## La decisión del generador, resuelta
+
+Groq contra Ollama **no era una decisión de arquitectura**: los dos hablan
+`POST /v1/chat/completions` de OpenAI. La decisión real era qué protocolo habla
+el segundo adaptador del puerto `AIProvider`, y la respuesta es ese, porque
+además resuelve el caso on-premise — un cliente que no puede sacar sus datos
+apunta `AI_BASE_URL` a su propio vLLM y no cambia una línea de código.
+
+`packages/providers/src/ai/openai-compatible.ts` sirve Groq, Ollama, vLLM, LM
+Studio, Together y OpenRouter. Elegir entre ellos es una variable de entorno:
+
+```bash
+AI_PROVIDER=groq    GROQ_API_KEY=...   # requiere cuenta gratuita
+AI_PROVIDER=ollama                     # sin cuenta; ollama pull qwen2.5:7b-instruct
+```
+
+**En uso: Groq con `openai/gpt-oss-120b`**, que es el modelo por defecto del
+backend. No es el más grande del catálogo a propósito — ver el hallazgo sobre
+salida estructurada. Un modelo de esa talla hace que un mal número sea
+atribuible al pipeline; con uno pequeño en local, "abstención 40%" no distingue
+entre pipeline roto y modelo corto, que es justo la ambigüedad que un arnés
+existe para eliminar. Ollama queda como el camino sin cuenta y como la respuesta
+on-premise.
+
+El precio declarado en el perfil del backend es el de LISTA, aunque el plan
+gratuito facture 0: así el informe dice cuánto costaría esa tirada en
+producción, que es la cifra que importa para el producto. La tirada completa
+sale a $0,0043.
 
 ## Próximo paso
 
-Añadir un generador gratuito para cerrar Fase 1 con la medición completa.
-Pendiente de decisión del usuario:
+`apps/api` con `/v1/knowledge/search` y `/answer`. La lógica ya está entera en
+`packages/knowledge/src/answer.ts` y medida; la API solo la expone. Después, los
+conversores PDF/DOCX, que son los únicos que necesitan librería.
 
-- **Ollama** local — sin cuenta, consume RAM
-- **Groq** plan gratuito — más rápido, requiere registro, soporta salida
-  estructurada (necesaria para las citas obligatorias)
+Para repetir la medición:
 
-Después: `apps/api` con `/v1/knowledge/search` y `/answer`, y los conversores
-PDF/DOCX (los únicos que necesitan librería).
+```bash
+npm run prompts:seed
+AI_PROVIDER=groq GROQ_API_KEY=... npm run eval
+```
 
 ## Decisiones abiertas
 
 - **Proveedor de embeddings definitivo.** Ahora el local gratuito. Cambiarlo
   obliga a reindexar, pero la convivencia de dimensiones ya está implementada y
   probada (`packages/knowledge/src/dimensions.ts` + migración 003).
+- **Enviar datos de tenant a Groq.** El corpus del arnés es sintético, así que
+  medir no compromete nada. Servir a un cliente real desde Groq sí exige un DPA;
+  para quien no lo acepte, el mismo adaptador apuntado a un servidor propio es
+  la respuesta, y ya funciona.
 - **Prisma 6.19 vs 7.x.** Se arrancó en 6.19 por estabilidad.
 - **`.gitattributes`.** Git avisa de conversión LF→CRLF; sin él, un equipo mixto
   verá ficheros enteros como modificados sin tocarlos.
