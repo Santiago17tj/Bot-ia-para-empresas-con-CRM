@@ -118,6 +118,14 @@ export class ProviderError extends Error {
     readonly providerId: string,
     readonly retryable: boolean,
     override readonly cause?: unknown,
+    /**
+     * Espera que pidió el proveedor, si la pidió (`Retry-After`).
+     *
+     * Existe porque un plan gratuito con límite de cuota responde 429 diciendo
+     * cuánto hay que esperar, y un backoff exponencial inventado por nosotros
+     * reintenta antes de tiempo y vuelve a agotar la cuota.
+     */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
   }
