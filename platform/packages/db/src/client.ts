@@ -137,7 +137,39 @@ function buildClient(): PrismaClient {
   });
 }
 
-const globalRef = globalThis as { __platformPrisma?: PrismaClient };
+const globalRef = globalThis as {
+  __platformPrisma?: PrismaClient;
+  __platformSystemPrisma?: PrismaClient;
+};
+
+/**
+ * Conexión de PROPIETARIO. Se salta RLS.
+ *
+ * Existe para la única operación que por definición no puede ocurrir dentro de
+ * un tenant: **crear el tenant**. El alta de un cliente sucede antes de que
+ * exista contexto, así que ninguna política puede autorizarla — no hay
+ * `app.tenant_id` que fijar todavía.
+ *
+ * Usos legítimos, y no hay más:
+ *   - Aprovisionar y eliminar tenants
+ *   - Migraciones y sembrado
+ *   - Preparación y limpieza en tests
+ *
+ * NUNCA en la ruta de una petición. Un handler que llegue aquí ha desactivado
+ * las tres capas de aislamiento de golpe, y lo habrá hecho en silencio: las
+ * consultas devuelven datos correctos, solo que de todos los clientes.
+ * Si lo que necesitas es trabajo de sistema *dentro* de un tenant, lo que
+ * quieres es `runAsSystem` con el cliente normal.
+ */
+export const systemPrisma: PrismaClient =
+  globalRef.__platformSystemPrisma ??
+  new PrismaClient({
+    datasources: { db: { url: required("DATABASE_URL") } },
+    log: ["warn", "error"],
+  });
+if (process.env["NODE_ENV"] !== "production") {
+  globalRef.__platformSystemPrisma = systemPrisma;
+}
 
 /** Cliente crudo, sin filtro de tenant. Migraciones y tareas de sistema. */
 export const rawPrisma: PrismaClient = globalRef.__platformPrisma ?? buildClient();

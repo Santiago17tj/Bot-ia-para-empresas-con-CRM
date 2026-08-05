@@ -1,6 +1,7 @@
 export {
   prisma,
   rawPrisma,
+  systemPrisma,
   withRlsTransaction,
   createTenantExtension,
   Prisma,
