@@ -1,0 +1,25 @@
+export {
+  prisma,
+  rawPrisma,
+  withRlsTransaction,
+  createTenantExtension,
+  Prisma,
+} from "./client.js";
+export type { TenantPrisma } from "./client.js";
+
+export {
+  runWithTenant,
+  runAsSystem,
+  getTenantContext,
+  requireTenantContext,
+  requireTenantId,
+  TenantContextError,
+} from "./tenant.js";
+export type { TenantContext } from "./tenant.js";
+
+export {
+  TENANT_SCOPED_MODELS,
+  GLOBAL_MODELS,
+  isTenantScoped,
+} from "./models.js";
+export type { TenantScopedModel } from "./models.js";

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.storage/
+
+# Todo .env salvo el ejemplo. Cubre .env.bak y .env.old, que un `git add -A`
+# distraído habría subido.
+.env
+.env.*
+!.env.example
+
+.DS_Store
+Thumbs.db
+coverage/
+.eval-results/

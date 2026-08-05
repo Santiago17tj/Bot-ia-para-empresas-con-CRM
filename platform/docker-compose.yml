@@ -1,0 +1,31 @@
+services:
+  postgres:
+    # pgvector sobre Postgres 17. La imagen trae la extensión compilada:
+    # instalar pgvector a mano en Windows es lo que hace que Docker no sea opcional aquí.
+    image: pgvector/pgvector:pg17
+    container_name: platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      POSTGRES_DB: platform
+      # Ordenación española vía ICU, no vía locale del sistema: la imagen solo
+      # tiene generada C.UTF-8, y pedir es_ES.UTF-8 hace fallar initdb entero.
+      # ICU viene compilado en Postgres 17 y no depende del sistema operativo.
+      #
+      # Esto afecta a la ORDENACIÓN (ORDER BY con acentos y ñ). La búsqueda
+      # léxica es independiente: usa to_tsvector('spanish', …), cuya
+      # configuración la trae Postgres y no la locale.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=es-ES --locale=C.UTF-8"
+    ports:
+      - "5433:5432"
+    volumes:
+      - platform-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  platform-pgdata:

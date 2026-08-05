@@ -1,0 +1,33 @@
+{
+  "name": "@platform/root",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Enterprise AI OS — knowledge, memory, reasoning, actions, integrations",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "db:generate": "npm run generate -w @platform/db",
+    "db:migrate": "npm run migrate -w @platform/db",
+    "db:deploy": "npm run deploy -w @platform/db",
+    "db:studio": "npm run studio -w @platform/db",
+    "db:reset": "npm run reset -w @platform/db",
+    "build": "tsc --build",
+    "typecheck": "tsc --build --force",
+    "test": "npm run build && node --env-file-if-exists=.env --test \"packages/*/test/**/*.test.ts\"",
+    "test:unit": "npm run build && node --test \"packages/*/test/**/*.test.ts\" --test-skip-pattern=\"integration\"",
+    "dev": "npm run dev -w @platform/api"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.0",
+    "typescript": "^5.9.2"
+  }
+}

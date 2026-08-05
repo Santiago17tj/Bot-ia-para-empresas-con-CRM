@@ -1,0 +1,733 @@
+// Enterprise AI OS — esquema Fase 0 + Fase 1.
+//
+// Dos reglas que se aplican a TODO lo de este fichero y que no se retrofitean:
+//
+//  1. Cada tabla lleva `tenantId`. Sin excepciones salvo `Tenant` y `Prompt`
+//     global. Incluso donde es desnormalizado (Chunk lo lleva aunque podría
+//     deducirlo por Document) — filtra sin JOIN en la ruta caliente.
+//
+//  2. Toda unicidad es COMPUESTA con tenantId. Un `@unique` a secas es el error
+//     que hace inviable el CRM de referencia para multi-tenant: dos clientes no
+//     pueden tener el mismo correo en su base de contactos.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  output          = "../generated/client"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector, pg_trgm, unaccent]
+}
+
+// ===========================================================================
+// TENANCY E IDENTIDAD
+// ===========================================================================
+
+enum TenantPlan {
+  TRIAL
+  STARTER
+  GROWTH
+  BUSINESS
+  ENTERPRISE
+}
+
+model Tenant {
+  id        String     @id @default(cuid())
+  slug      String     @unique // el único unique global legítimo del esquema
+  name      String
+  plan      TenantPlan @default(TRIAL)
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  memberships      Membership[]
+  apiKeys          ApiKey[]
+  businessDNA      BusinessDNA?
+  aiConfig         TenantAIConfig?
+  flagOverrides    FeatureFlagOverride[]
+  knowledgeSources KnowledgeSource[]
+  documents        Document[]
+  chunks           Chunk[]
+  traces           AITrace[]
+  auditLogs        AuditLog[]
+  usageRecords     UsageRecord[]
+  outboxEvents     OutboxEvent[]
+  promptDeploys    PromptDeployment[]
+  evalSuites       EvalSuite[]
+
+  @@map("tenant")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships Membership[]
+
+  @@map("user")
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+model Membership {
+  id       String     @id @default(cuid())
+  tenantId String
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     MemberRole @default(VIEWER)
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@map("membership")
+}
+
+model ApiKey {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name String
+  // Solo el hash. La clave se muestra una vez al crearla y nunca se lee de vuelta;
+  // `last4` es lo único que la interfaz puede enseñar (§28).
+  keyHash String   @unique
+  last4   String
+  scopes  String[]
+
+  rateLimitPerMinute Int       @default(60)
+  lastUsedAt         DateTime?
+  expiresAt          DateTime?
+  revokedAt          DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@map("apiKey")
+}
+
+// ===========================================================================
+// IDENTIDAD DE LA EMPRESA — Business DNA (§11)
+// ===========================================================================
+
+// Define CÓMO responde (cadencia: meses). Distinto de BusinessRule, que define
+// QUÉ responde (cadencia: días), y de TenantAIConfig, que son parámetros
+// técnicos. Los tres separados a propósito: mezclados, cambiar un umbral de
+// recuperación obliga a tocar el objeto que define la misión de la empresa.
+model BusinessDNA {
+  tenantId String @id
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  mission String?
+  values  String[]
+  culture String?
+
+  // Voz
+  tone       String  @default("profesional y cercano")
+  formality  String  @default("neutral")
+  vocabulary String[]
+  avoidWords String[]
+
+  // Comportamiento — esto es lo que lo diferencia de un prompt de tono.
+  // `neverDo` viaja en prioridad 2 del Context Package y NUNCA se trunca (§6.3),
+  // y además se valida contra la respuesta generada antes de enviarla (§11.2).
+  alwaysDo        String[]
+  neverDo         String[]
+  legalBoundaries String[]
+
+  escalationPhilosophy String?
+
+  // Comercial
+  crossSell         Boolean @default(false)
+  discountAuthority String?
+  priceDisclosure   String?
+  priorities        String[]
+
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@map("businessDna")
+}
+
+model TenantAIConfig {
+  tenantId String @id
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  languages   String[] @default(["es"])
+  temperature Float    @default(0.2)
+
+  // Por debajo de este umbral NO se invoca al generador: capa 1 del grounding.
+  // Un modelo que no ve la pregunta no puede inventar la respuesta (§12.2).
+  groundingThreshold Float  @default(0.35)
+  fallbackMessage    String @default("No tengo esa información en la documentación de la empresa.")
+
+  maxCostPerConversation Float @default(0.5)
+  maxCostPerMonth        Float @default(100)
+
+  preferredAiProvider String?
+  // Cambiar esto NO es un ajuste en caliente: obliga a reindexar el tenant.
+  // Se trata como migración, no como preferencia (§25).
+  embeddingProvider   String  @default("openai")
+  embeddingModel      String  @default("text-embedding-3-small")
+  embeddingDimensions Int     @default(1536)
+
+  contextTokenBudget Int @default(24000)
+
+  humanReviewCategories String[]
+  dataResidency         String?
+
+  updatedAt DateTime @updatedAt
+
+  @@map("tenantAiConfig")
+}
+
+// ===========================================================================
+// FEATURE FLAGS (§25)
+// ===========================================================================
+
+model FeatureFlag {
+  key         String   @id
+  description String
+  // Sin override, esto es lo que se aplica.
+  defaultValue Json    @default("false")
+  createdAt   DateTime @default(now())
+
+  overrides FeatureFlagOverride[]
+
+  @@map("featureFlag")
+}
+
+model FeatureFlagOverride {
+  id       String      @id @default(cuid())
+  tenantId String
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  flagKey  String
+  flag     FeatureFlag @relation(fields: [flagKey], references: [key], onDelete: Cascade)
+
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, flagKey])
+  @@map("featureFlagOverride")
+}
+
+// ===========================================================================
+// PROMPT REGISTRY (§24) — ningún prompt vive en el código
+// ===========================================================================
+
+model Prompt {
+  id          String   @id @default(cuid())
+  key         String   @unique // "knowledge.answer", "orchestrator.classify"
+  description String
+  createdAt   DateTime @default(now())
+
+  versions    PromptVersion[]
+  deployments PromptDeployment[]
+
+  @@map("prompt")
+}
+
+model PromptVersion {
+  id       String @id @default(cuid())
+  promptId String
+  prompt   Prompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  version Int
+  // Inmutable una vez creada. Una versión que se edita es una versión que ya no
+  // explica la respuesta que se archivó citándola.
+  template  String
+  variables Json     @default("[]")
+  notes     String?
+  createdAt DateTime @default(now())
+  createdBy String?
+
+  deployments PromptDeployment[]
+
+  @@unique([promptId, version])
+  @@map("promptVersion")
+}
+
+model PromptDeployment {
+  id       String @id @default(cuid())
+  promptId String
+  prompt   Prompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  versionId String
+  promptVer PromptVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  // null = despliegue global. Con tenantId = solo ese cliente.
+  tenantId String?
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Reparto para A/B. 100 = todo el tráfico de ese ámbito.
+  trafficPercent Int      @default(100)
+  isActive       Boolean  @default(true)
+  deployedAt     DateTime @default(now())
+  deployedBy     String?
+
+  @@index([promptId, tenantId, isActive])
+  @@map("promptDeployment")
+}
+
+// ===========================================================================
+// CONOCIMIENTO (§7)
+// ===========================================================================
+
+enum SourceKind {
+  PDF
+  DOCX
+  XLSX
+  CSV
+  TXT
+  MARKDOWN
+  URL
+  SITEMAP
+  NOTION
+  CONFLUENCE
+  GOOGLE_DRIVE
+  SHAREPOINT
+  DROPBOX
+  ONEDRIVE
+  SQL_QUERY
+  REST_API
+  PRODUCTS
+  INVENTORY
+  PRICING
+  ORDERS
+  CUSTOMERS
+  MANUAL_ENTRY
+  FAQ
+}
+
+enum IngestStatus {
+  PENDING
+  RUNNING
+  READY
+  FAILED
+  SKIPPED
+}
+
+model KnowledgeSource {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name String
+  kind SourceKind
+  // Credenciales y parámetros del origen. Los secretos van cifrados (§28).
+  config Json       @default("{}")
+
+  syncCursor     Json?
+  syncSchedule   String? // cron; null = solo manual
+  lastSyncAt     DateTime?
+  lastSyncStatus IngestStatus?
+  lastSyncError  String?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents Document[]
+
+  @@index([tenantId, isActive])
+  @@map("knowledgeSource")
+}
+
+model Document {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  sourceId String?
+  source   KnowledgeSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  title      String
+  kind       SourceKind
+  mimeType   String?
+  storageKey String? // ruta en el driver de almacenamiento
+  sourceRef  String? // URL o id externo — lo que se enseña como cita clicable
+
+  // Control editorial: un documento caducado NO debe responder preguntas.
+  // Se filtra en recuperación, no solo se muestra en el panel.
+  effectiveFrom DateTime?
+  expiresAt     DateTime?
+  isActive      Boolean   @default(true)
+
+  status      IngestStatus @default(PENDING)
+  statusError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions DocumentVersion[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, isActive])
+  @@index([sourceId])
+  @@map("document")
+}
+
+// Nada se borra. Una versión nueva marca `supersededAt` en la anterior y
+// desactiva sus fragmentos. Es lo que permite citar "según la política del 12
+// de marzo", revertir una carga y auditar qué sabía el sistema al responder.
+model DocumentVersion {
+  id         String   @id @default(cuid())
+  tenantId   String
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  version Int
+  // sha256 del contenido extraído. Mismo fichero dos veces no crea versión nueva.
+  checksum   String
+  byteSize   Int?
+  pageCount  Int?
+  language   String?
+  rawText    String?
+
+  isActive     Boolean   @default(true)
+  supersededAt DateTime?
+
+  ingestedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  chunks Chunk[]
+
+  @@unique([documentId, version])
+  @@unique([tenantId, documentId, checksum])
+  @@index([tenantId, isActive])
+  @@map("documentVersion")
+}
+
+model Chunk {
+  id       String @id @default(cuid())
+  // Desnormalizado a propósito: la recuperación filtra por tenant sin JOIN.
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  versionId String
+  version   DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  ordinal    Int
+  content    String
+  tokenCount Int
+
+  // --- Metadatos enriquecidos (§7.4) --------------------------------------
+  // No es decoración: cada campo es un filtro en recuperación y material para
+  // la cita que ve el usuario.
+  title       String?
+  language    String   @default("es")
+  category    String?
+  tags        String[]
+  department  String?
+  author      String?
+  breadcrumbs String[] // ["Garantías", "Devoluciones", "Plazo"]
+  pageNumber  Int?
+  sectionPath String?
+
+  // ACLs heredadas del origen (Drive, SharePoint). El Context Engine las aplica
+  // ANTES de que el modelo vea nada, nunca después (§5, §7.4).
+  permissions Json @default("{}")
+
+  // --- Embedding ----------------------------------------------------------
+  // Proveedor y dimensión POR FRAGMENTO. Sin esto, cambiar de proveedor obliga
+  // a reindexar todo el corpus de todos los clientes de golpe; con esto, la
+  // migración es por lotes con doble escritura (§25).
+  embeddingProvider   String?
+  embeddingModel      String?
+  embeddingDimensions Int?
+
+  // Columnas gestionadas por SQL crudo — Prisma no las sabe leer ni escribir.
+  // La migración las crea; el pipeline de ingesta las puebla.
+  //   embedding    vector(1536)
+  //   search_vector tsvector   (to_tsvector con el regconfig del idioma)
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, isActive])
+  @@index([versionId, ordinal])
+  @@map("chunk")
+}
+
+// ===========================================================================
+// OBSERVABILIDAD (§25)
+// ===========================================================================
+
+enum TraceStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  ABSTAINED
+}
+
+model AITrace {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  operation String // "knowledge.answer", "knowledge.search"
+  status    TraceStatus @default(RUNNING)
+
+  intent  String?
+  routing Json? // proveedor, modelo, motivo, coste estimado
+
+  // El Context Package archivado: qué entró, qué se truncó y por qué. Sin esto,
+  // "la IA respondió mal" es una queja irresoluble (§6.2, §25).
+  contextPackage Json?
+  truncated      String[]
+
+  // Referencias a prompts CON SU VERSIÓN. Una regresión de calidad sin esto es
+  // indiagnosticable: nadie sabe qué cambió ni cuándo.
+  promptRefs Json?
+  flags      Json?
+
+  inputTokens  Int   @default(0)
+  outputTokens Int   @default(0)
+  cachedTokens Int   @default(0)
+  cost         Float @default(0)
+  latencyMs    Int?
+
+  groundingResult Json?
+  answered        Boolean?
+  errors          Json?
+
+  createdAt DateTime @default(now())
+
+  steps TraceStep[]
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, operation, createdAt])
+  @@map("aiTrace")
+}
+
+model TraceStep {
+  id      String  @id @default(cuid())
+  traceId String
+  trace   AITrace @relation(fields: [traceId], references: [id], onDelete: Cascade)
+
+  ordinal   Int
+  kind      String // "retrieval" | "generation" | "validation" | "embedding"
+  name      String
+  input     Json?
+  output    Json?
+  latencyMs Int?
+  cost      Float  @default(0)
+  error     String?
+
+  createdAt DateTime @default(now())
+
+  @@index([traceId, ordinal])
+  @@map("traceStep")
+}
+
+// ===========================================================================
+// GOBIERNO Y CONSUMO (§29, §30)
+// ===========================================================================
+
+model AuditLog {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  actorType String // "user" | "apiKey" | "system"
+  actorId   String?
+  action    String // "document.create", "prompt.deploy"
+  resource  String
+  resourceId String?
+  metadata  Json?
+  ipAddress String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, resource, resourceId])
+  @@map("auditLog")
+}
+
+enum UsageMetric {
+  INPUT_TOKENS
+  OUTPUT_TOKENS
+  CACHED_TOKENS
+  EMBEDDINGS
+  STORAGE_BYTES
+  DOCUMENTS
+  CHUNKS
+  API_CALLS
+  SEARCHES
+  ANSWERS
+}
+
+// Se emite desde el día uno porque el consumo pasado no se reconstruye (§30).
+// Pasa por el Event Bus: medir NO está en la ruta crítica — si el contador
+// falla, la respuesta sale igual.
+model UsageRecord {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  metric   UsageMetric
+  quantity Float
+  cost     Float       @default(0)
+
+  // Día UTC, para agregar sin escanear por rango.
+  periodDay DateTime
+  meta      Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, periodDay, metric])
+  @@map("usageRecord")
+}
+
+// ===========================================================================
+// EVENT BUS — outbox transaccional (§21)
+// ===========================================================================
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+  DEAD
+}
+
+// El evento se escribe en la MISMA transacción que el cambio que lo origina.
+// Sin esto, un fallo entre "guardar documento" y "publicar evento" deja un
+// documento que el panel muestra como listo y que no responde nada, sin log que
+// lo explique. Es el fallo silencioso más caro de diagnosticar del sistema.
+model OutboxEvent {
+  id       String  @id @default(cuid())
+  tenantId String?
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  type    String // "document.uploaded", "knowledge.gap"
+  payload Json
+
+  status      OutboxStatus @default(PENDING)
+  attempts    Int          @default(0)
+  maxAttempts Int          @default(5)
+  // Retroceso exponencial: el despachador solo reclama filas con availableAt <= now.
+  availableAt DateTime     @default(now())
+  lockedAt    DateTime?
+  lockedBy    String?
+  lastError   String?
+
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+
+  @@index([status, availableAt])
+  @@index([tenantId, type, createdAt])
+  @@map("outboxEvent")
+}
+
+// ===========================================================================
+// EVALUACIÓN (§33)
+// ===========================================================================
+
+enum EvalCaseKind {
+  ANSWERABLE
+  // Un tercio del conjunto. Un sistema que acierta todo lo que sabe y además
+  // inventa lo que no sabe puntúa alto en recall y precision y es inservible.
+  UNANSWERABLE
+  FORBIDDEN // debe negarse por el neverDo del ADN
+}
+
+model EvalSuite {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  cases EvalCase[]
+  runs  EvalRun[]
+
+  @@unique([tenantId, name])
+  @@map("evalSuite")
+}
+
+model EvalCase {
+  id      String    @id @default(cuid())
+  suiteId String
+  suite   EvalSuite @relation(fields: [suiteId], references: [id], onDelete: Cascade)
+
+  kind     EvalCaseKind
+  question String
+  // Para ANSWERABLE: qué debería contener y de qué documento debería salir.
+  expectedAnswer   String?
+  expectedSources  String[]
+  mustNotContain   String[]
+  notes            String?
+
+  createdAt DateTime @default(now())
+
+  results EvalResult[]
+
+  @@index([suiteId, kind])
+  @@map("evalCase")
+}
+
+model EvalRun {
+  id      String    @id @default(cuid())
+  suiteId String
+  suite   EvalSuite @relation(fields: [suiteId], references: [id], onDelete: Cascade)
+
+  label     String?
+  gitRef    String?
+  config    Json? // proveedor, modelo, versiones de prompt, flags
+
+  // Métricas agregadas
+  totalCases         Int   @default(0)
+  recallAtK          Float?
+  precision          Float?
+  groundingScore     Float?
+  hallucinationRate  Float?
+  correctAbstention  Float?
+  forbiddenViolations Int  @default(0)
+  avgLatencyMs       Int?
+  totalCost          Float @default(0)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  results EvalResult[]
+
+  @@index([suiteId, startedAt])
+  @@map("evalRun")
+}
+
+model EvalResult {
+  id     String   @id @default(cuid())
+  runId  String
+  run    EvalRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  caseId String
+  case   EvalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  answered        Boolean
+  response        String?
+  citations       Json?
+  retrievedChunks String[]
+  passed          Boolean
+  failureReason   String?
+  latencyMs       Int?
+  cost            Float    @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@unique([runId, caseId])
+  @@map("evalResult")
+}

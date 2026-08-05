@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Material de referencia: repos de terceros descargados para consultar.
+# No son nuestros, traen su propia licencia e historial, y pesan 49 MB.
+# El PLAN-TECNICO.md los cita por ruta; quien los necesite los descarga.
+# ---------------------------------------------------------------------------
+crm-main/
+TencentDB-Agent-Memory-feat-server_team/
+
+# --- Dependencias y artefactos de compilación ------------------------------
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Cliente de Prisma: se regenera con `npm install` (postinstall). Commitearlo
+# es subir código generado —incluidos binarios .dll.node y .wasm— que queda
+# obsoleto en cuanto cambia el esquema.
+#
+# Sin las dos barras iniciales el patrón queda anclado a la raíz del repo y no
+# alcanza platform/packages/db/. `**/` lo hace coincidir a cualquier nivel.
+**/generated/
+
+# Ajustes locales de Claude Code: permisos de esta máquina, no del proyecto.
+.claude/settings.local.json
+
+# --- Secretos ---------------------------------------------------------------
+# Todo .env salvo el ejemplo. Cubre .env.bak y .env.old, que un `git add -A`
+# distraído habría subido.
+.env
+.env.*
+!.env.example
+
+# --- Datos locales ----------------------------------------------------------
+.storage/
+.eval-results/
+coverage/
+
+# --- Sistema operativo ------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
