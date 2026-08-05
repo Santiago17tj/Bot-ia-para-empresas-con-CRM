@@ -1,0 +1,163 @@
+name: CI
+
+# La puerta del arnés existe para bloquear despliegues. Hasta ahora salía con
+# código 1 cuando debía y no la ejecutaba nadie: una puerta que nadie abre no
+# bloquea nada.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Una tirada por rama. Empujar tres veces seguidas no debe dejar tres CI
+# compitiendo por la misma base de datos.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: platform
+
+jobs:
+  test:
+    name: Tests e invariantes
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # La MISMA imagen que docker-compose.yml. Una versión distinta en CI
+        # que en desarrollo convierte cada fallo en una pregunta sobre el
+        # entorno antes que sobre el código.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+          POSTGRES_DB: platform
+          # Ordenación española por ICU, igual que en local. Con una locale
+          # distinta, un ORDER BY con eñes se comporta de otra forma aquí y
+          # allí, y eso se descubre en producción.
+          POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=es-ES --locale=C.UTF-8"
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://platform:platform@localhost:5433/platform?schema=public
+      DATABASE_URL_APP: postgresql://platform_app:platform_app@localhost:5433/platform?schema=public
+      # El proveedor local: sin clave, sin coste, y es sobre el que está
+      # calibrado el umbral de grounding. Con otro, los números no aplican.
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_MODEL: Xenova/multilingual-e5-small
+      EMBEDDING_DIMENSIONS: "384"
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_PATH: ./.storage
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # El repo declara >=22. Se fija 22 y no `latest` para que una versión
+          # nueva de Node no rompa CI un martes sin que nadie haya tocado nada.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Preparar la base de datos
+        # `setup` = migrate deploy + el SQL crudo (pgvector, tsvector, rol de
+        # aplicación, políticas RLS). NO se usa `migrate dev`: Prisma detecta
+        # como deriva las columnas que añade ese SQL y querría resetear.
+        run: npm run setup -w @platform/db
+
+      - name: Compilar
+        run: npm run build
+
+      - name: Sembrar el catálogo de prompts
+        # Los tests de respuesta fundada resuelven el prompt desde el registro.
+        # Sin esto fallan por el motivo equivocado.
+        run: npm run prompts:seed
+
+      - name: Tests
+        # Incluye los de integración: con DATABASE_URL puesta dejan de saltarse.
+        # Ahí están los que importan — aislamiento entre tenants, ingesta de
+        # punta a punta y validación de citas.
+        run: npm test
+
+  eval:
+    name: Arnés de evaluación (abstención)
+    needs: test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+          POSTGRES_DB: platform
+          POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=es-ES --locale=C.UTF-8"
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://platform:platform@localhost:5433/platform?schema=public
+      DATABASE_URL_APP: postgresql://platform_app:platform_app@localhost:5433/platform?schema=public
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_MODEL: Xenova/multilingual-e5-small
+      EMBEDDING_DIMENSIONS: "384"
+      AI_PROVIDER: groq
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ¿Hay credencial para medir?
+        id: credencial
+        run: |
+          if [ -z "${GROQ_API_KEY}" ]; then
+            echo "hay=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sin GROQ_API_KEY. La medición de abstención NO se ejecutó."
+            echo "::notice::Añade el secreto en Settings → Secrets → Actions para que esta puerta bloquee de verdad."
+          else
+            echo "hay=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.credencial.outputs.hay == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: platform/package-lock.json
+
+      - name: Instalar dependencias
+        if: steps.credencial.outputs.hay == 'true'
+        run: npm ci
+
+      - name: Preparar la base de datos
+        if: steps.credencial.outputs.hay == 'true'
+        run: npm run setup -w @platform/db
+
+      - name: Sembrar el catálogo de prompts
+        if: steps.credencial.outputs.hay == 'true'
+        run: npm run prompts:seed
+
+      - name: Medir recuperación y abstención
+        if: steps.credencial.outputs.hay == 'true'
+        # Sale con código 1 si la puerta bloquea. Cuesta unos $0,005 por tirada
+        # a precio de lista, y el plan gratuito de Groq factura 0.
+        run: npm run eval

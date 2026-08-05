@@ -297,12 +297,30 @@ Dentro de la API, ingerir un manual dejaría al servidor sin responder a nadie.
 Es también el motivo de `--test-concurrency=1`: en paralelo, los tests de
 integración se bloquean entre ellos y fallan por algo que no es el código.
 
+## CI
+
+`.github/workflows/ci.yml`, dos jobs:
+
+- **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
+  ICU que `docker-compose.yml`. Ejecuta los 199 tests, integración incluida:
+  con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
+- **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
+  secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
+  deja la puerta abierta. Añádelo en Settings → Secrets → Actions.
+
+Usa `npm run setup -w @platform/db`, no `db:migrate`: `prisma migrate dev`
+detecta como deriva las columnas que añade el SQL crudo y querría resetear la
+base. Ver el apartado de migraciones.
+
+La secuencia entera está verificada contra una base vacía en un contenedor
+aparte, no solo escrita.
+
 ## Próximo paso
 
 Conversores PDF/DOCX, los únicos que necesitan librería. El registro
 (`registerConverter`) ya está y la ruta de subida los rechaza hoy con un 415 que
-lo dice. Después, CI —no hay `.github`, así que la puerta del arnés no bloquea
-nada— y el resto de la superficie de §27.
+lo dice. Después, el resto de la superficie de §27 (`/v1/chat`, `/v1/sources`
+para conectores, `/v1/contacts`).
 
 Para repetir la medición:
 
