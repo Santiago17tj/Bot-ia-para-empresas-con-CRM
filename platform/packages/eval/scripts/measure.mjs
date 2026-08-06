@@ -1,5 +1,7 @@
 import "@platform/env/load";
 
+import { randomUUID } from "node:crypto";
+
 import { runWithTenant, systemPrisma, withRlsTransaction } from "@platform/db";
 import { ingestDocument } from "@platform/knowledge";
 import { PromptNotFoundError } from "@platform/observability";
@@ -27,12 +29,21 @@ import {
  * es un fallo del script: es el arnés diciendo la verdad.
  */
 
-const TENANT = "tnt_eval_measure";
+/**
+ * Un tenant distinto por ejecución.
+ *
+ * Era un id fijo, y con eso dos mediciones simultáneas —comparar dos modelos,
+ * o CI corriendo mientras alguien mide en local contra la misma base— se
+ * pisaban: la segunda ingería sobre el corpus de la primera y la primera en
+ * terminar borraba el tenant de las dos. El resultado no era un error, era un
+ * número plausible y sin sentido, que es lo peor que puede producir un arnés.
+ */
+const TENANT = `tnt_eval_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
 const ctx = {
   tenantId: TENANT,
   actor: { type: "system", id: "eval-measure", scopes: [] },
-  requestId: "req_eval_measure",
+  requestId: `req_eval_${TENANT}`,
 };
 
 async function main() {
@@ -55,7 +66,7 @@ async function main() {
   await systemPrisma.tenant.upsert({
     where: { id: TENANT },
     update: {},
-    create: { id: TENANT, slug: "eval-measure", name: "Eval Measure" },
+    create: { id: TENANT, slug: TENANT, name: "Eval Measure" },
   });
 
   try {

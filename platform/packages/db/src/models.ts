@@ -18,6 +18,7 @@ export const TENANT_SCOPED_MODELS = [
   "Document",
   "DocumentVersion",
   "Chunk",
+  "KnowledgeGap",
   "AITrace",
   "AuditLog",
   "UsageRecord",

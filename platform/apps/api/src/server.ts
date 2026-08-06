@@ -13,6 +13,7 @@ import {
 import { ApiError, toErrorResponse } from "./errors.js";
 import { RateLimiter } from "./rate-limit.js";
 import { registerDocumentRoutes } from "./routes/documents.js";
+import { registerGapRoutes } from "./routes/gaps.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerKnowledgeRoutes } from "./routes/knowledge.js";
 
@@ -126,6 +127,7 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
 
     await scope.register(registerKnowledgeRoutes);
     await scope.register(registerDocumentRoutes);
+    await scope.register(registerGapRoutes);
   });
 
   return app;

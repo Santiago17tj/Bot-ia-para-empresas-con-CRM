@@ -202,10 +202,30 @@ export async function withRlsTransaction<T>(
     );
   }
 
-  return rawPrisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-    return fn(tx);
-  });
+  return rawPrisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      return fn(tx);
+    },
+    {
+      // Los 5 s por defecto de Prisma son cortos PARA ESTE SISTEMA, y no porque
+      // aquí se haga trabajo lento dentro de transacciones —justamente se evita—
+      // sino porque el proveedor de embeddings local corre ONNX en el hilo
+      // principal y BLOQUEA el event loop varios segundos seguidos.
+      //
+      // El efecto es indirecto y desconcertante: una transacción con un solo
+      // UPDATE trivial expira porque, mientras esperaba su turno, otro trabajo
+      // del mismo proceso tenía el bucle parado. El error dice "considera hacer
+      // menos trabajo en la transacción" y la transacción no hacía casi nada.
+      //
+      // Visto de verdad: los tests de huecos fallaron con "6372 ms passed" en
+      // un `update` de una fila, con una medición corriendo en paralelo. Con la
+      // CPU libre, los mismos tests tardan 4 s en total.
+      timeout: 30_000,
+      // Cuánto se espera a que haya conexión libre en el pool. Mismo motivo.
+      maxWait: 10_000,
+    },
+  );
 }
 
 export { Prisma };

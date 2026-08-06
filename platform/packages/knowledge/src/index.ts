@@ -51,4 +51,22 @@ export type {
 } from "./grounding.js";
 
 export { answerFromKnowledge, renderContext } from "./answer.js";
+
+export {
+  recordGap,
+  GAP_CANDIDATE_THRESHOLD,
+  GAP_CANDIDATE_LIMIT,
+  MAX_VARIANTS,
+} from "./gaps.js";
+export type {
+  GapCandidate,
+  GapDeps,
+  GapInput,
+  GapMatcher,
+  GapReason,
+  GapResult,
+} from "./gaps.js";
+
+export { createGapMatcher } from "./gap-matcher.js";
+export type { GapMatcherOptions } from "./gap-matcher.js";
 export type { AnswerOptions, AnswerResult } from "./answer.js";

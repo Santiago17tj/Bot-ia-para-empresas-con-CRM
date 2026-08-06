@@ -110,6 +110,7 @@ DECLARE
     'document',
     'documentVersion',
     'chunk',
+    'knowledgeGap',
     'aiTrace',
     'auditLog',
     'usageRecord',

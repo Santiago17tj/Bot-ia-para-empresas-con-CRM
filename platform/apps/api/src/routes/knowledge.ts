@@ -1,12 +1,14 @@
 import type { FastifyInstance } from "fastify";
 
 import { withRlsTransaction, type Prisma } from "@platform/db";
+import { publish } from "@platform/events";
 import {
   answerFromKnowledge,
   embedQuery,
   hybridSearch,
   passesThreshold,
   DEFAULT_SIMILARITY_THRESHOLD,
+  type GapReason,
   type RetrievalHit,
 } from "@platform/knowledge";
 import { recordUsage, usageFromGeneration } from "@platform/observability";
@@ -134,11 +136,15 @@ export async function registerKnowledgeRoutes(app: FastifyInstance): Promise<voi
       // no ve la pregunta no puede inventar la respuesta, y la abstención sale
       // gratis.
       if (!passesThreshold(hits, policy.groundingThreshold)) {
-        await meter(tenantId, [
-          { metric: "API_CALLS", quantity: 1 },
-          { metric: "ANSWERS", quantity: 1 },
-          { metric: "EMBEDDINGS", quantity: 1 },
-        ]);
+        await meter(
+          tenantId,
+          [
+            { metric: "API_CALLS", quantity: 1 },
+            { metric: "ANSWERS", quantity: 1 },
+            { metric: "EMBEDDINGS", quantity: 1 },
+          ],
+          { question, reason: "BELOW_THRESHOLD" },
+        );
 
         return reply.send({
           answered: false,
@@ -162,12 +168,20 @@ export async function registerKnowledgeRoutes(app: FastifyInstance): Promise<voi
         }),
       );
 
-      await meter(tenantId, [
-        { metric: "API_CALLS", quantity: 1 },
-        { metric: "ANSWERS", quantity: 1 },
-        { metric: "EMBEDDINGS", quantity: 1 },
-        ...usageFromGeneration(result),
-      ]);
+      await meter(
+        tenantId,
+        [
+          { metric: "API_CALLS", quantity: 1 },
+          { metric: "ANSWERS", quantity: 1 },
+          { metric: "EMBEDDINGS", quantity: 1 },
+          ...usageFromGeneration(result),
+        ],
+        // Toda abstención es un hueco, pero no todas significan lo mismo: que
+        // el modelo se abstenga teniendo los fragmentos delante dice que hay
+        // documentación cercana que no cubre el caso, y que la validación
+        // tumbara la respuesta dice además que el modelo intentó rellenarlo.
+        gapFor(result, question),
+      );
 
       return reply.send({
         answered: result.answer.answered,
@@ -239,12 +253,43 @@ async function loadPolicy(
 async function meter(
   tenantId: string,
   entries: Parameters<typeof recordUsage>[2],
+  gap?: { question: string; reason: GapReason },
 ): Promise<void> {
   try {
-    await withRlsTransaction((tx) => recordUsage(tx, tenantId, entries));
+    await withRlsTransaction(async (tx) => {
+      await recordUsage(tx, tenantId, entries);
+
+      // El hueco se publica en la MISMA transacción que la medición. Lo pesado
+      // —embeber la pregunta y buscarle grupo— lo hace el worker: no lo paga
+      // quien está esperando la respuesta, y menos en una abstención, que ya
+      // es de por sí la petición más lenta.
+      if (gap !== undefined) {
+        await publish(tx, {
+          type: "knowledge.gap",
+          tenantId,
+          payload: { question: gap.question, reason: gap.reason },
+        });
+      }
+    });
   } catch {
     // Deliberadamente silencioso aquí; el fallo se ve en la traza.
   }
+}
+
+/**
+ * Qué clase de hueco es esta respuesta, si es alguno.
+ *
+ * Una respuesta correcta no es un hueco. Una degradación sí, y de la peor
+ * clase: significa que el corpus no sostenía la respuesta Y que el modelo lo
+ * intentó igualmente.
+ */
+function gapFor(
+  result: { answer: { answered: boolean }; degraded: boolean },
+  question: string,
+): { question: string; reason: GapReason } | undefined {
+  if (result.degraded) return { question, reason: "GROUNDING_FAILED" };
+  if (!result.answer.answered) return { question, reason: "MODEL_ABSTAINED" };
+  return undefined;
 }
 
 /** Lo que sale por la API. El vector y los rangos internos no salen. */

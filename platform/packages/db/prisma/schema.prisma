@@ -57,6 +57,7 @@ model Tenant {
   outboxEvents     OutboxEvent[]
   promptDeploys    PromptDeployment[]
   evalSuites       EvalSuite[]
+  knowledgeGaps    KnowledgeGap[]
 
   @@map("tenant")
 }
@@ -288,6 +289,75 @@ model PromptDeployment {
 
   @@index([promptId, tenantId, isActive])
   @@map("promptDeployment")
+}
+
+// ===========================================================================
+// HUECOS DE CONOCIMIENTO (§9, Knowledge Health)
+// ===========================================================================
+
+/** Por qué no se pudo responder. Los tres significan cosas distintas. */
+enum GapReason {
+  // Ni siquiera se recuperó material por encima del umbral: capa 1. Suele
+  // significar que el tema no está en el corpus en absoluto.
+  BELOW_THRESHOLD
+  // El generador tuvo los fragmentos delante y dijo que no contestan la
+  // pregunta. Es el hueco más interesante: hay documentación cercana y no
+  // cubre el caso.
+  MODEL_ABSTAINED
+  // El modelo respondió y la validación de citas lo tumbó. No es solo un
+  // hueco: es un hueco donde además el modelo intentó rellenarlo.
+  GROUNDING_FAILED
+}
+
+enum GapStatus {
+  OPEN
+  DOCUMENTED
+  DISMISSED
+}
+
+/**
+ * Una pregunta que el sistema no supo responder, agrupada con sus equivalentes.
+ *
+ * Es conocimiento que GENERA la plataforma y que la empresa no tiene por otro
+ * medio: qué le preguntan sus clientes que su documentación no cubre. Cada
+ * abstención es una señal, y una abstención que no se registra es una señal que
+ * no se recupera — el mismo motivo por el que la medición de consumo se emite
+ * desde el primer día.
+ *
+ * Se agrupa por SIGNIFICADO, no por texto: nadie pregunta dos veces igual, y
+ * una lista de preguntas literales distintas no dice que treinta personas
+ * quieren saber lo mismo. De ahí el vector, que añade el SQL crudo (migración
+ * 004) igual que en `chunk`.
+ */
+model KnowledgeGap {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /** La primera formulación vista. Representa al grupo. */
+  question String
+  /** Otras maneras de preguntar lo mismo. Acotadas: es una muestra, no un log. */
+  variants    String[]
+  occurrences Int      @default(1)
+
+  reason GapReason
+  status GapStatus @default(OPEN)
+
+  // Con qué se embebió la pregunta. Agrupar vectores de proveedores distintos
+  // no significa nada, así que la búsqueda de grupo filtra por esto.
+  embeddingProvider   String
+  embeddingDimensions Int
+
+  /** Qué documento lo cerró. Es lo que cierra el círculo del producto. */
+  resolvedByDocumentId String?
+  resolvedAt           DateTime?
+
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  @@index([tenantId, status, occurrences])
+  @@index([tenantId, lastSeenAt])
+  @@map("knowledgeGap")
 }
 
 // ===========================================================================

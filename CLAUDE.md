@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 213 tests
+npm test               # 221 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -66,7 +66,7 @@ de punta a punta.
 | `events` | Outbox transaccional + despachador | 11 |
 | `observability` | Trazas, Prompt Registry, siembra, consumo | 11 |
 | `context` | Context Engine, presupuesto, recetas | 22 |
-| `knowledge` | Conversión (**PDF/DOCX**), troceado, híbrida, grounding, respuesta | 58 + 20 int. |
+| `knowledge` | Conversión (PDF/DOCX), troceado, híbrida, grounding, respuesta, **huecos** | 58 + 28 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*` | 14 int. |
@@ -187,6 +187,23 @@ mide sobre el contenido de los fragmentos, la precisión dice `n/a` cuando nadie
 la mide, y hay métrica de respuestas erróneas con umbral cero. Un 100% que
 significa "no se midió" es peor que un hueco, porque nadie lo investiga.
 
+**El coseno tampoco distingue "misma pregunta" de "mismo tema".** Segunda vez
+que este proyecto se encuentra con lo mismo. Medido en
+`packages/eval/scripts/calibrate-gaps.mjs`:
+
+| | Similitud |
+|---|---|
+| Equivalentes («¿ofrecéis financiación?» ≈ «¿puedo pagar a plazos?») | 0,842 – 0,939 |
+| Distintas («¿cuánto **cuesta** el envío?» ≠ «¿cuánto **tarda** el envío?») | 0,885 – 0,948 |
+
+Se solapan enteros y **al revés**: el par más parecido de la muestra (0,948) son
+dos preguntas distintas y el menos parecido (0,842) es la misma pregunta con
+otras palabras. Estos modelos codifican el TEMA, y dos preguntas del mismo tema
+comparten casi todo el vector aunque pidan cosas opuestas. No hay umbral.
+
+Por eso los huecos se agrupan con el generador y el vector solo preselecciona
+candidatos. Si alguien vuelve a poner un umbral ahí, esta tabla dice por qué no.
+
 **El `.env` seleccionaba embeddings de OpenAI mientras todo se medía con el
 local.** `EMBEDDING_PROVIDER=openai` con la clave vacía, frente a los 384d de
 `multilingual-e5-small` sobre los que se calibró todo lo de arriba. Los tests no
@@ -250,6 +267,32 @@ El precio declarado en el perfil del backend es el de LISTA, aunque el plan
 gratuito facture 0: así el informe dice cuánto costaría esa tirada en
 producción, que es la cifra que importa para el producto. La tirada completa
 sale a $0,0043.
+
+## Los tres generadores, medidos
+
+Mismo conjunto, mismo corpus, misma máquina:
+
+| | Groq `gpt-oss-120b` | local `qwen2.5:7b` | local `qwen2.5:3b` |
+|---|---|---|---|
+| Abstención correcta | 100% | 100% | 100% |
+| Alucinación | 0% | 0% | 0% |
+| Sobreabstención | 0% | 16,7% | 33,3% |
+| Fallos de citación | 0% | 0% | 10% |
+| Latencia p50 | 2,1 s | 134 s | 31 s |
+| Latencia p95 | 15 s | 394 s | 73 s |
+| Puerta | PASA | PASA | **BLOQUEA** |
+
+**Ninguno inventa.** Ese es el resultado que importa: la arquitectura —salida
+estructurada con citas obligatorias más validación en código— aguanta incluso
+con un 3B. Lo que se degrada al bajar de modelo no es la seguridad, es la
+utilidad: los pequeños se callan cosas que sí sabían.
+
+El 3B además falla al citar el 10% de las veces (copió un paréntesis que no
+estaba en el fragmento) y la red lo tumbó a abstención. Bloquea, y es correcto.
+
+**Para on-premise, el 7B es servible en calidad y no en latencia**: 6,5 minutos
+en el peor caso sobre CPU. Ese cliente necesita GPU, y ahora se puede decir con
+un número antes de firmar.
 
 ## La API
 
@@ -341,6 +384,29 @@ lo convierte en el número de página del fragmento — el dato con el que una
 persona comprueba una cita en un manual de 300 páginas. El marcador se elimina
 antes de embeber: dejarlo metería ruido en el vector.
 
+## Huecos de conocimiento
+
+Cada abstención dice algo que la empresa no sabe por otro medio: sus clientes
+preguntan por X y su documentación no lo cubre. Es conocimiento que **genera la
+plataforma**.
+
+Se registra desde el día uno por el mismo motivo que el consumo: **el pasado no
+se reconstruye**. Lo que no se guarde hoy no se puede recuperar mañana.
+
+`POST /v1/knowledge/answer` publica `knowledge.gap` en la misma transacción que
+la medición de consumo; el worker embebe, busca candidatos por vector y le pide
+al generador que decida si es un hueco ya conocido. `GET /v1/knowledge/gaps` los
+sirve **ordenados por número de veces**, no por fecha: lo último que preguntó
+alguien es una anécdota, lo que preguntan treinta dirige el trabajo.
+
+Tres motivos, y no significan lo mismo: `BELOW_THRESHOLD` (no había ni
+material), `MODEL_ABSTAINED` (había documentación cercana que no cubría el caso
+— el más accionable) y `GROUNDING_FAILED` (además el modelo intentó rellenarlo).
+
+Sin generador configurado **no se agrupa**: cada abstención abre su fila. Peor
+informe, pero no es un dato perdido — y es mejor que agrupar con un umbral que
+la medición dice que no existe.
+
 ## Próximo paso
 
 El resto de la superficie de §27: `/v1/chat`, `/v1/sources` para conectores
@@ -370,6 +436,25 @@ AI_PROVIDER=groq GROQ_API_KEY=... npm run eval
 - **Prisma 6.19 vs 7.x.** Se arrancó en 6.19 por estabilidad.
 - **`.gitattributes`.** Git avisa de conversión LF→CRLF; sin él, un equipo mixto
   verá ficheros enteros como modificados sin tocarlos.
+
+## Dos trampas de este entorno
+
+**`prisma generate` falla con EPERM si hay un proceso vivo con el cliente
+cargado.** Windows bloquea `query_engine-windows.dll.node` y el renombrado del
+temporal falla. Pasa al medir en segundo plano y compilar a la vez: hay que
+esperar a que el proceso termine.
+
+**Las transacciones expiran por el event loop, no por su propio trabajo.** El
+proveedor de embeddings local corre ONNX en el hilo principal y lo bloquea
+segundos seguidos. El efecto es desconcertante: una transacción con un solo
+`UPDATE` trivial expira porque, mientras esperaba turno, otro trabajo del mismo
+proceso tenía el bucle parado — y el error dice "considera hacer menos trabajo
+en la transacción". Por eso `withRlsTransaction` lleva `timeout: 30_000`. Visto
+de verdad: "6372 ms passed" en un `update` de una fila, con una medición
+corriendo en paralelo; con la CPU libre, esos mismos tests tardan 4 s.
+
+Corolario: **no corras `npm test` y `npm run eval` a la vez.** Además de fallos
+espurios, la latencia que informe el arnés no será real.
 
 ## Cómo trabaja el usuario
 

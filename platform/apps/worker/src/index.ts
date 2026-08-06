@@ -2,11 +2,14 @@ import "@platform/env/load";
 
 import { optional } from "@platform/env";
 import { EventDispatcher } from "@platform/events";
-import { createEmbeddingProvider } from "@platform/providers";
+import { createAIProvider, createEmbeddingProvider } from "@platform/providers";
 import { createStorage } from "@platform/storage";
 
+import { createGapHandler } from "./gap-handler.js";
 import { createIngestHandler } from "./ingest-handler.js";
 
+export { createGapHandler } from "./gap-handler.js";
+export type { GapPayload } from "./gap-handler.js";
 export { createIngestHandler } from "./ingest-handler.js";
 export type { UploadedPayload } from "./ingest-handler.js";
 
@@ -45,13 +48,33 @@ export function buildDispatcher(): EventDispatcher {
     },
   });
 
+  // UN solo proveedor para los dos consumidores. Construir dos carga el modelo
+  // de 120 MB dos veces y duplica la memoria del proceso a cambio de nada: la
+  // carga es perezosa y compartir la instancia es lo que la hace ocurrir una vez.
+  const embedder = createEmbeddingProvider();
+
   dispatcher.on(
     "document.uploaded",
     "ingest",
-    createIngestHandler({
-      storage: createStorage(),
-      embedder: createEmbeddingProvider(),
-    }),
+    createIngestHandler({ storage: createStorage(), embedder }),
+  );
+
+  // El generador puede no estar configurado: sin él se registran los huecos
+  // igual, solo que sin agrupar. Un dato peor presentado sigue siendo el dato;
+  // no registrarlo sería perderlo para siempre.
+  let provider;
+  try {
+    provider = createAIProvider();
+  } catch {
+    console.warn(
+      "[worker] sin generador configurado: los huecos se registran sin agrupar.",
+    );
+  }
+
+  dispatcher.on(
+    "knowledge.gap",
+    "gaps",
+    createGapHandler({ embedder, ...(provider === undefined ? {} : { provider }) }),
   );
 
   return dispatcher;
