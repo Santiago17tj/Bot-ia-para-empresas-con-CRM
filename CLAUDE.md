@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 321 tests
+npm test               # 341 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -70,7 +70,7 @@ de punta a punta.
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
-| `connectors` | Orígenes, rastreador web, defensa SSRF, cron | 65 |
+| `connectors` | Web, **Notion**, SSRF, cron | 85 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources` | 14 int. |
 | `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
 
@@ -511,12 +511,48 @@ empresa tiene lo que no está en su web pública. **La cabecera va atada al orig
 y no cruza a otro dominio**: una redirección a un CDN o a un acortador entregaría
 el token del cliente a un tercero.
 
+## Notion
+
+**Token interno, no OAuth.** OAuth público exige registrar una integración en
+Notion, alojar una URL de callback y pasar su revisión. El camino que una PYME
+usa de verdad —y el único construible y verificable hoy— es que el cliente cree
+una integración interna en su espacio y pegue el token. Ese token es un secreto
+y va cifrado: es el primer usuario real de `@platform/secrets`.
+
+Cuando llegue OAuth, el token acaba en el mismo campo y nada del conector
+cambia; lo que cambia es de dónde sale.
+
+**La integración solo ve lo que le han compartido.** Es la primera causa de "no
+funciona" con Notion y no es un fallo: hay que compartir cada página con la
+integración desde `··· → Conexiones`. Crearla no basta. Un espacio entero sin
+nada compartido devuelve cero resultados, así que ese caso emite un aviso que lo
+explica en vez de terminar en verde con cero documentos.
+
+**Aquí no hay heurística.** Notion guarda `heading_1/2/3` como tipos de bloque
+distintos, así que la estructura viene dada — al contrario que en un PDF, donde
+hubo que inferirla del tamaño de fuente. Se conservan tablas (donde una PYME
+pone precios y plazos), enlaces (que muchas veces SON la respuesta) y los tipos
+desconocidos con su texto, porque Notion añade bloques nuevos cada pocos meses.
+
+**Lo incremental usa `last_edited_time`**, no un hash del contenido: se salta la
+página ANTES de pedir sus bloques. Una página de cien bloques son varias
+peticiones que no se hacen.
+
+Notion limita a ~3 peticiones por segundo **por integración**, y pasarse bloquea
+el token DEL CLIENTE. De ahí la pausa entre peticiones, que en producción no se
+toca.
+
+**Verificado contra un servidor que imita su API**, con paginación por cursor e
+hijos en peticiones aparte. Conviene decirlo claro: eso verifica nuestro código,
+no el comportamiento de Notion. Falta una pasada contra un espacio real.
+
 ## Próximo paso
 
-Conectores con credenciales (Notion, Drive). La capa de secretos ya está, así
-que lo que falta de cada uno es su OAuth y su paginación.
+Probar Notion contra un espacio de verdad: crear una integración interna,
+compartirle un par de páginas y sincronizar. Es lo único que los tests con
+servidor simulado no pueden cubrir.
 
-Luego `/v1/chat` y `/v1/contacts`.
+Después Google Drive, y luego `/v1/chat` y `/v1/contacts`.
 
 Deuda conocida: la sincronización programada se interpreta en **UTC**, así que
 una PYME española que ponga `0 3 * * *` sincroniza a las 4:00 locales en verano.

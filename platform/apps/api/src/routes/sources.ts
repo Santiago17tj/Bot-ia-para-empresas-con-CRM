@@ -39,7 +39,7 @@ const CREATE_BODY = {
   additionalProperties: false,
   properties: {
     name: { type: "string", minLength: 1, maxLength: 200 },
-    kind: { type: "string", enum: ["URL", "SITEMAP"] },
+    kind: { type: "string", enum: ["URL", "SITEMAP", "NOTION"] },
     config: { type: "object" },
     // Cron. Null o ausente = solo manual.
     syncSchedule: { type: ["string", "null"], maxLength: 100 },
@@ -59,7 +59,7 @@ const UPDATE_BODY = {
 
 interface CreateBody {
   name: string;
-  kind: "URL" | "SITEMAP";
+  kind: "URL" | "SITEMAP" | "NOTION";
   config: Record<string, unknown>;
   syncSchedule?: string | null;
 }

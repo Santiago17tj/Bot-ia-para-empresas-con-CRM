@@ -1,8 +1,15 @@
+import { notionConnector } from "./notion.js";
 import { webConnector } from "./web.js";
 import { ConnectorError, type SourceConnector } from "./types.js";
 
 export { webConnector, USER_AGENT, extractLinks, parseSitemap, parseRobots } from "./web.js";
 export type { WebSourceConfig } from "./web.js";
+
+export { notionConnector, titleOf } from "./notion.js";
+export type { NotionSourceConfig } from "./notion.js";
+
+export { blocksToMarkdown, richTextToMarkdown } from "./notion-blocks.js";
+export type { NotionBlock, NotionRichText } from "./notion-blocks.js";
 
 export {
   assertFetchableUrl,
@@ -40,6 +47,7 @@ export type {
 const CONNECTORS: Record<string, SourceConnector> = {
   URL: webConnector,
   SITEMAP: webConnector,
+  NOTION: notionConnector,
 };
 
 export function connectorFor(kind: string): SourceConnector {
