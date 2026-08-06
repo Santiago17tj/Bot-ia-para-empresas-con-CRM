@@ -7,11 +7,13 @@ import { createStorage } from "@platform/storage";
 
 import { createGapHandler } from "./gap-handler.js";
 import { createIngestHandler } from "./ingest-handler.js";
+import { createSyncHandler } from "./sync-handler.js";
 
 export { createGapHandler } from "./gap-handler.js";
 export type { GapPayload } from "./gap-handler.js";
 export { createIngestHandler } from "./ingest-handler.js";
 export type { UploadedPayload } from "./ingest-handler.js";
+export { createSyncHandler } from "./sync-handler.js";
 
 /**
  * Worker de ingesta.
@@ -52,12 +54,11 @@ export function buildDispatcher(): EventDispatcher {
   // de 120 MB dos veces y duplica la memoria del proceso a cambio de nada: la
   // carga es perezosa y compartir la instancia es lo que la hace ocurrir una vez.
   const embedder = createEmbeddingProvider();
+  const storage = createStorage();
 
-  dispatcher.on(
-    "document.uploaded",
-    "ingest",
-    createIngestHandler({ storage: createStorage(), embedder }),
-  );
+  dispatcher.on("document.uploaded", "ingest", createIngestHandler({ storage, embedder }));
+
+  dispatcher.on("source.sync.requested", "sync", createSyncHandler({ storage }));
 
   // El generador puede no estar configurado: sin él se registran los huecos
   // igual, solo que sin agrupar. Un dato peor presentado sigue siendo el dato;

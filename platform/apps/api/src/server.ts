@@ -15,6 +15,7 @@ import { RateLimiter } from "./rate-limit.js";
 import { registerDocumentRoutes } from "./routes/documents.js";
 import { registerGapRoutes } from "./routes/gaps.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerSourceRoutes } from "./routes/sources.js";
 import { registerKnowledgeRoutes } from "./routes/knowledge.js";
 
 declare module "fastify" {
@@ -128,6 +129,7 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
     await scope.register(registerKnowledgeRoutes);
     await scope.register(registerDocumentRoutes);
     await scope.register(registerGapRoutes);
+    await scope.register(registerSourceRoutes);
   });
 
   return app;

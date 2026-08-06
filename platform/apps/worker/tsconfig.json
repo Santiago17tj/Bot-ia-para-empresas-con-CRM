@@ -1,13 +1,33 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "./src", "outDir": "./dist" },
-  "include": ["src/**/*.ts"],
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
   "references": [
-    { "path": "../../packages/db" },
-    { "path": "../../packages/env" },
-    { "path": "../../packages/events" },
-    { "path": "../../packages/knowledge" },
-    { "path": "../../packages/providers" },
-    { "path": "../../packages/storage" }
+    {
+      "path": "../../packages/db"
+    },
+    {
+      "path": "../../packages/env"
+    },
+    {
+      "path": "../../packages/events"
+    },
+    {
+      "path": "../../packages/knowledge"
+    },
+    {
+      "path": "../../packages/providers"
+    },
+    {
+      "path": "../../packages/storage"
+    },
+    {
+      "path": "../../packages/connectors"
+    }
   ]
 }

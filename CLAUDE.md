@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 221 tests
+npm test               # 270 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -69,8 +69,9 @@ de punta a punta.
 | `knowledge` | Conversión (PDF/DOCX), troceado, híbrida, grounding, respuesta, **huecos** | 58 + 28 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
-| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*` | 14 int. |
-| `apps/worker` | Despachador del outbox, ingesta asíncrona | 8 int. |
+| `connectors` | Costura de orígenes + rastreador web, defensa SSRF | 41 |
+| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources` | 14 int. |
+| `apps/worker` | Despachador del outbox, ingesta, huecos, sincronización | 16 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
 **Estado actual del arnés**). La API sirve `/v1/knowledge/search`, `/answer` y
@@ -407,12 +408,56 @@ Sin generador configurado **no se agrupa**: cada abstención abre su fila. Peor
 informe, pero no es un dato perdido — y es mejor que agrupar con un umbral que
 la medición dice que no existe.
 
+## Conectores
+
+`/v1/sources`. El primero es el rastreador **web** y no Notion ni Drive, por una
+razón práctica: no necesita cuenta de terceros ni OAuth ni secretos que cifrar,
+así que se puede construir Y verificar entero. Y para una PYME su web ES su
+documentación — condiciones de envío, devoluciones y preguntas frecuentes ya
+están publicadas y aprobadas.
+
+**El conector no ingiere.** Descubre y entrega bytes; a partir de ahí es
+exactamente el mismo camino que un fichero subido a mano: almacenamiento,
+documento en `PENDING`, `document.uploaded` en la misma transacción. Por eso
+añadir Notion es un fichero en `@platform/connectors` y nada más.
+
+**Un conector que descarga URLs elegidas por el cliente es un SSRF por diseño.**
+El tenant escribe una dirección y nuestro servidor la pide, desde dentro de
+nuestra red y con nuestra identidad. El caso que lo resume:
+
+```
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+```
+
+Esa IP es el endpoint de metadatos de AWS, GCP y Azure y devuelve credenciales
+de la instancia. Un rastreador ingenuo la pide, la guarda como "documento", y el
+cliente la consulta después por la API de conocimiento.
+
+`packages/connectors/src/net.ts` resuelve el nombre y juzga **las IPs**, no el
+texto: comprobar el hostname no sirve porque un dominio público puede apuntar a
+donde quiera. Y valida **cada salto** de redirección con `redirect: "manual"` —
+con seguimiento automático, validar la primera URL no sirve de nada.
+
+`CONNECTORS_ALLOW_PRIVATE_NETWORK=true` abre la red privada para on-premise,
+donde es exactamente donde está la documentación. Apagado por defecto porque
+dejarlo abierto falla en silencio y tenerlo cerrado falla diciendo qué activar.
+
+El cursor guarda el hash por URL: la segunda pasada no vuelve a pagar troceado
+ni embeddings de lo que no cambió. Sin eso, una sincronización nocturna cuesta
+dinero cada noche por nada.
+
 ## Próximo paso
 
-El resto de la superficie de §27: `/v1/chat`, `/v1/sources` para conectores
-(Notion, URL, Drive) y `/v1/contacts`. `KnowledgeSource` ya está en el esquema
-con `syncSchedule` y `syncCursor`, así que el sitio donde encaja un conector ya
-existe.
+**El planificador.** `syncSchedule` guarda un cron y no lo lee nadie: hoy la
+sincronización es manual. Sin planificador, "el conocimiento siempre al día" es
+un botón que alguien tiene que pulsar.
+
+Después, conectores con credenciales (Notion, Drive) — y ahí sí hace falta
+`SECRETS_ENCRYPTION_KEY`, que está en `.env` y **no lo lee ningún código**. Los
+secretos se cifran en reposo y no se devuelven por API (§28), así que eso hay
+que construirlo antes del primer conector con token.
+
+Luego `/v1/chat` y `/v1/contacts`.
 
 Pendiente menor: `xlsx`, `pptx` y el `.doc` antiguo se rechazan con un 415 que
 dice qué hacer.

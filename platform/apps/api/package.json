@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",
+    "@platform/connectors": "*",
     "@platform/db": "*",
     "@platform/env": "*",
     "@platform/events": "*",

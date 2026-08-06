@@ -22,6 +22,8 @@ export const EVENT_TYPES = [
   "knowledge.indexed",
   "knowledge.reindexed",
   "knowledge.gap", // una pregunta sin respuesta: alimenta Knowledge Health
+  "source.sync.requested",
+  "source.sync.completed",
   // Conversación
   "message.received",
   "message.sent",
