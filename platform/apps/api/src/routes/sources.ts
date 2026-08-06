@@ -9,6 +9,13 @@ import {
   parseCron,
 } from "@platform/connectors";
 
+import {
+  encryptConfigSecrets,
+  redactSecrets,
+  secretsReady,
+  SecretsError,
+} from "@platform/secrets";
+
 import { requireScope } from "../auth.js";
 import { ApiError } from "../errors.js";
 import { readInTenant } from "../server.js";
@@ -92,10 +99,11 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
         id: source.id,
         name: source.name,
         kind: source.kind,
-        // La configuración se devuelve tal cual porque hoy no lleva secretos.
-        // El día que un conector necesite un token, ese campo NO sale de aquí:
-        // los secretos se cifran en reposo y no se devuelven por API (§28).
-        config: source.config,
+        // Redactada SIEMPRE. Los secretos no salen por API ni cifrados (§28):
+        // publicar un texto cifrado es publicar algo que solo depende de una
+        // clave, y las claves se filtran. El conector declara qué campos lo son;
+        // esta capa no necesita saber de qué van.
+        config: publicConfig(source.kind, source.config),
         syncSchedule: source.syncSchedule,
         lastSyncAt: source.lastSyncAt,
         lastSyncStatus: source.lastSyncStatus,
@@ -120,6 +128,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
       // crearla falla la primera noche que sincroniza, cuando nadie mira.
       const validated = validateOrFail(kind, config);
       assertValidSchedule(syncSchedule);
+      const stored = encryptOrFail(kind, validated, {}, request.tenantCtx.tenantId);
 
       const source = await readInTenant(request.tenantCtx, (tx) =>
         tx.knowledgeSource.create({
@@ -127,14 +136,17 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
             tenantId: request.tenantCtx.tenantId,
             name,
             kind,
-            config: validated as Prisma.InputJsonValue,
+            config: stored as Prisma.InputJsonValue,
             syncSchedule: syncSchedule ?? null,
           },
           select: { id: true, name: true, kind: true, config: true, createdAt: true },
         }),
       );
 
-      return reply.status(201).send(source);
+      return reply.status(201).send({
+        ...source,
+        config: publicConfig(source.kind, source.config),
+      });
     },
   );
 
@@ -156,19 +168,31 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
             ...(config === undefined
               ? {}
               : {
-                  config: validateOrFail(
+                  config: encryptOrFail(
                     existing.kind,
-                    config,
+                    validateOrFail(existing.kind, config),
+                    (existing.config ?? {}) as Record<string, unknown>,
+                    request.tenantCtx.tenantId,
                   ) as Prisma.InputJsonValue,
                 }),
             ...(syncSchedule === undefined ? {} : { syncSchedule }),
             ...(isActive === undefined ? {} : { isActive }),
           },
-          select: { id: true, name: true, config: true, syncSchedule: true, isActive: true },
+          select: {
+            id: true,
+            name: true,
+            kind: true,
+            config: true,
+            syncSchedule: true,
+            isActive: true,
+          },
         }),
       );
 
-      return reply.send(updated);
+      return reply.send({
+        ...updated,
+        config: publicConfig(updated.kind, updated.config),
+      });
     },
   );
 
@@ -228,8 +252,64 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
     requireScope(request.apiKey, "knowledge:read");
 
     const source = await findOrFail(request.tenantCtx, request.params.id);
-    return reply.send(source);
+    return reply.send({ ...source, config: publicConfig(source.kind, source.config) });
   });
+}
+
+/**
+ * La configuración tal y como puede salir por la API.
+ *
+ * Un único sitio a propósito: cuatro respuestas devuelven configuración, y si
+ * cada una decidiera por su cuenta qué ocultar, bastaría añadir una quinta para
+ * filtrar un token.
+ */
+function publicConfig(kind: string, config: unknown): Record<string, unknown> {
+  return redactSecrets(
+    (config ?? {}) as Record<string, unknown>,
+    connectorFor(kind).secretFields,
+  );
+}
+
+/**
+ * Cifra los campos secretos, o se niega a guardar.
+ *
+ * Sin clave de cifrado NO se acepta una configuración con credenciales.
+ * Guardarla en claro sería peor que rechazarla: el cliente creería que su token
+ * está protegido y estaría en la base y en todas las copias de seguridad.
+ */
+function encryptOrFail(
+  kind: string,
+  config: Record<string, unknown>,
+  previous: Record<string, unknown>,
+  tenantId: string,
+): Record<string, unknown> {
+  const fields = connectorFor(kind).secretFields;
+  const traeSecreto = fields.some(
+    (field) => config[field] !== undefined && config[field] !== null,
+  );
+
+  if (traeSecreto && !secretsReady()) {
+    throw new ApiError(
+      503,
+      "secrets_unavailable",
+      "El cifrado de secretos no está configurado, así que no se puede guardar " +
+        "una credencial. Genera SECRETS_ENCRYPTION_KEY con: openssl rand -base64 32",
+    );
+  }
+
+  try {
+    // El propósito ata el texto cifrado a su sitio: un token movido a otro
+    // campo, o a otro tenant, deja de descifrar.
+    return encryptConfigSecrets(config, previous, fields, {
+      tenantId,
+      purposePrefix: "source.config",
+    });
+  } catch (error) {
+    if (error instanceof SecretsError) {
+      throw new ApiError(400, "invalid_secret", error.message);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -275,6 +355,7 @@ async function findOrFail(
 ): Promise<{
   id: string;
   kind: string;
+  config: unknown;
   isActive: boolean;
   lastSyncStatus: string | null;
 }> {
@@ -303,6 +384,7 @@ async function findOrFail(
   return source as unknown as {
     id: string;
     kind: string;
+    config: unknown;
     isActive: boolean;
     lastSyncStatus: string | null;
   };

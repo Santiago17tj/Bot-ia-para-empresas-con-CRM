@@ -34,6 +34,14 @@ export interface WebSourceConfig {
   excludePatterns: string[];
   /** Respetar robots.txt. Se puede desactivar para el sitio propio. */
   respectRobots: boolean;
+  /**
+   * Credencial para sitios protegidos. Se guarda cifrada (§28).
+   *
+   * El caso real es la documentación interna: una intranet o un wiki detrás de
+   * autenticación, que es justo donde una empresa tiene lo que no está en su
+   * web pública.
+   */
+  authToken?: string;
 }
 
 const DEFAULTS: Omit<WebSourceConfig, "startUrls"> = {
@@ -56,6 +64,7 @@ interface CrawlCursor extends SyncCursor {
 
 export const webConnector: SourceConnector = {
   kind: "URL",
+  secretFields: ["authToken"],
 
   validateConfig(raw) {
     const config = (raw ?? {}) as Partial<WebSourceConfig>;
@@ -108,6 +117,9 @@ export const webConnector: SourceConnector = {
       includePatterns: config.includePatterns ?? [],
       excludePatterns: config.excludePatterns ?? [],
       respectRobots: config.respectRobots ?? DEFAULTS.respectRobots,
+      ...(typeof config.authToken === "string" && config.authToken !== ""
+        ? { authToken: config.authToken }
+        : {}),
     };
   },
 
@@ -126,6 +138,18 @@ export const webConnector: SourceConnector = {
     // convierte una sincronización en un rastreo de internet entero — y en un
     // segundo camino para alcanzar cosas que no son del cliente.
     const origins = new Set(config.startUrls.map((u) => new URL(u).origin));
+
+    // La credencial se ata al origen de la PRIMERA URL de inicio. Si el
+    // rastreo salta a otro dominio —una redirección, un enlace— la cabecera no
+    // viaja: entregar el token del cliente a un tercero es peor que no rastrear
+    // esa página.
+    const auth =
+      config.authToken === undefined
+        ? undefined
+        : {
+            origin: new URL(config.startUrls[0] as string).origin,
+            header: `Bearer ${config.authToken}`,
+          };
     const robots = config.respectRobots ? new RobotsCache() : undefined;
 
     const queue: { url: string; depth: number }[] = [];
@@ -151,7 +175,10 @@ export const webConnector: SourceConnector = {
 
       let fetched;
       try {
-        fetched = await safeFetch(item.url, { userAgent: USER_AGENT });
+        fetched = await safeFetch(item.url, {
+          userAgent: USER_AGENT,
+          ...(auth === undefined ? {} : { auth }),
+        });
       } catch (error) {
         // Una URL rota no aborta la sincronización entera: se anota y se sigue.
         // Un sitio real siempre tiene algún enlace muerto, y que eso impida

@@ -54,6 +54,15 @@ export interface SyncContext {
 export interface SourceConnector {
   readonly kind: string;
   /**
+   * Campos de `config` que son credenciales.
+   *
+   * Lo declara el conector porque es quien sabe cuáles lo son. La API los cifra
+   * al guardar y los redacta al devolver sin saber de qué van; el día que
+   * alguien añada un conector con token, declararlo aquí es todo lo que hay que
+   * hacer para que no se filtre.
+   */
+  readonly secretFields: readonly string[];
+  /**
    * Valida la configuración ANTES de guardarla.
    *
    * Una fuente mal configurada que se acepta al crearla falla la primera noche

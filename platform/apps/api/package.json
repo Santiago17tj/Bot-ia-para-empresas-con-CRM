@@ -23,6 +23,7 @@
     "@platform/knowledge": "*",
     "@platform/observability": "*",
     "@platform/providers": "*",
+    "@platform/secrets": "*",
     "@platform/storage": "*",
     "fastify": "^5.2.0"
   }

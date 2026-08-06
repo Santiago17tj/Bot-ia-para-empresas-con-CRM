@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 300 tests
+npm test               # 321 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -69,9 +69,10 @@ de punta a punta.
 | `knowledge` | Conversión (PDF/DOCX), troceado, híbrida, grounding, respuesta, **huecos** | 58 + 28 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
-| `connectors` | Orígenes, rastreador web, defensa SSRF, cron | 63 |
+| `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
+| `connectors` | Orígenes, rastreador web, defensa SSRF, cron | 65 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources` | 14 int. |
-| `apps/worker` | Outbox, ingesta, huecos, sincronización, **planificador** | 24 int. |
+| `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
 **Estado actual del arnés**). La API sirve `/v1/knowledge/search`, `/answer` y
@@ -472,14 +473,54 @@ la única razón para traer una dependencia. Implementa la trampa del POSIX: con
 día-del-mes Y día-de-semana ambos restringidos, la regla es **O**, no Y.
 `0 0 1 * 1` es "el día 1 y además todos los lunes".
 
+## La capa de secretos
+
+`SECRETS_ENCRYPTION_KEY` llevaba en `.env` desde el primer commit y no lo leía
+ningún código. `packages/secrets` es lo que lo lee, y es requisito previo a
+cualquier conector con credenciales.
+
+**AES-256-GCM**, no "cifrar y ya". GCM es cifrado AUTENTICADO: si alguien altera
+un byte del texto cifrado, el descifrado FALLA en vez de devolver basura. Sin
+autenticación, quien tenga escritura en la base puede modificar el cifrado a
+ciegas y el sistema usaría el resultado como si fuera un token válido.
+
+**El texto cifrado va atado a su contexto** con datos autenticados asociados:
+`tenantId` + para qué es. Sin eso, copiar el valor cifrado de la fila de un
+cliente a la de otro FUNCIONA — el texto cifrado es válido y descifra
+perfectamente. Con AAD, falla. En multi-tenant eso no es teórico, y hay test.
+
+**El identificador de clave viaja dentro del sobre**, derivado de la propia
+clave. Es lo que hace posible rotar: la nueva en `SECRETS_ENCRYPTION_KEY`, la
+anterior en `SECRETS_ENCRYPTION_KEYS_OLD`, y lo viejo se sigue leyendo mientras
+lo nuevo usa la clave nueva. Sin él, rotar obliga a re-cifrar toda la base en
+una transacción —imposible con volumen— o a perder el acceso a lo anterior.
+
+**Cifrar no basta: los secretos no salen por la API ni cifrados.** Publicar un
+texto cifrado es publicar algo que solo depende de una clave, y las claves se
+filtran. `redactSecrets` se aplica en un único sitio para las cuatro respuestas
+que devuelven configuración — si cada una decidiera por su cuenta, bastaría
+añadir una quinta para filtrar un token.
+
+**Sin clave configurada NO se guarda nada en claro**: la API responde 503 y dice
+cómo generarla. Guardar la credencial sin cifrar sería peor que rechazarla,
+porque el cliente creería que está protegida.
+
+El conector declara qué campos son secretos (`secretFields`). El rastreador ya
+tiene uno: `authToken`, para intranets y wikis internos — que es donde una
+empresa tiene lo que no está en su web pública. **La cabecera va atada al origen
+y no cruza a otro dominio**: una redirección a un CDN o a un acortador entregaría
+el token del cliente a un tercero.
+
 ## Próximo paso
 
-Conectores con credenciales (Notion, Drive) — y ahí sí hace falta
-`SECRETS_ENCRYPTION_KEY`, que está en `.env` y **no lo lee ningún código**. Los
-secretos se cifran en reposo y no se devuelven por API (§28), así que eso hay
-que construirlo antes del primer conector con token.
+Conectores con credenciales (Notion, Drive). La capa de secretos ya está, así
+que lo que falta de cada uno es su OAuth y su paginación.
 
 Luego `/v1/chat` y `/v1/contacts`.
+
+Deuda conocida: la sincronización programada se interpreta en **UTC**, así que
+una PYME española que ponga `0 3 * * *` sincroniza a las 4:00 locales en verano.
+Zona horaria por tenant.
 
 Pendiente menor: `xlsx`, `pptx` y el `.doc` antiguo se rechazan con un 415 que
 dice qué hacer.

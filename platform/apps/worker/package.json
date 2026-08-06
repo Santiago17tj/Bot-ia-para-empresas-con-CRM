@@ -20,6 +20,7 @@
     "@platform/events": "*",
     "@platform/knowledge": "*",
     "@platform/providers": "*",
+    "@platform/secrets": "*",
     "@platform/storage": "*"
   },
   "devDependencies": {

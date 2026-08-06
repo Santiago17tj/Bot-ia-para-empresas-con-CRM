@@ -183,3 +183,96 @@ test("el escape de red privada existe para on-premise y está apagado por defect
     delete process.env["CONNECTORS_ALLOW_PRIVATE_NETWORK"];
   }
 });
+
+// ---------------------------------------------------------------------------
+// La credencial y el origen
+// ---------------------------------------------------------------------------
+
+test("la cabecera de autorización NO viaja a otro origen", async () => {
+  // Una redirección puede llevar a otro dominio, y mandar allí la cabecera
+  // entrega el token del cliente a un tercero. Pasa sin mala intención: un
+  // enlace a un CDN, un acortador, un dominio de marketing.
+  const recibidas: { host: string; auth: string | undefined }[] = [];
+
+  const uno = createServer((req, res) => {
+    recibidas.push({ host: "primero", auth: req.headers["authorization"] });
+    const destino = (req.headers["x-destino"] as string) ?? "";
+    res.writeHead(302, { location: destino });
+    res.end();
+  });
+  const dos = createServer((req, res) => {
+    recibidas.push({ host: "segundo", auth: req.headers["authorization"] });
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html><body>otro origen</body></html>");
+  });
+
+  await new Promise<void>((r) => uno.listen(0, "127.0.0.1", r));
+  await new Promise<void>((r) => dos.listen(0, "127.0.0.1", r));
+
+  const puerto = (s: Server): number => {
+    const a = s.address();
+    return typeof a === "object" && a !== null ? a.port : 0;
+  };
+
+  process.env["CONNECTORS_ALLOW_PRIVATE_NETWORK"] = "true";
+  try {
+    const origen = `http://127.0.0.1:${puerto(uno)}`;
+    const otro = `http://localhost:${puerto(dos)}`;
+
+    await safeFetch(`${origen}/salta`, {
+      userAgent: "test",
+      auth: { origin: origen, header: "Bearer token-del-cliente" },
+      // El servidor de destino se le dice por cabecera para no depender del orden.
+    }).catch(() => undefined);
+
+    // Se repite apuntando explícitamente al otro origen.
+    recibidas.length = 0;
+    const conDestino = await fetch(`${origen}/salta`, {
+      redirect: "manual",
+      headers: { "x-destino": `${otro}/destino` },
+    });
+    void conDestino;
+
+    recibidas.length = 0;
+    await safeFetch(`${otro}/directo`, {
+      userAgent: "test",
+      auth: { origin: origen, header: "Bearer token-del-cliente" },
+    });
+
+    assert.equal(
+      recibidas.find((r) => r.host === "segundo")?.auth,
+      undefined,
+      "FUGA: el token del cliente se mandó a un origen distinto del configurado",
+    );
+  } finally {
+    delete process.env["CONNECTORS_ALLOW_PRIVATE_NETWORK"];
+    await new Promise<void>((r) => uno.close(() => r()));
+    await new Promise<void>((r) => dos.close(() => r()));
+  }
+});
+
+test("la cabecera SÍ viaja al origen para el que se configuró", async () => {
+  let recibida: string | undefined;
+
+  const server = createServer((req, res) => {
+    recibida = req.headers["authorization"];
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html><body>ok</body></html>");
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  const origen = `http://127.0.0.1:${port}`;
+
+  process.env["CONNECTORS_ALLOW_PRIVATE_NETWORK"] = "true";
+  try {
+    await safeFetch(`${origen}/intranet`, {
+      userAgent: "test",
+      auth: { origin: origen, header: "Bearer token-del-cliente" },
+    });
+    assert.equal(recibida, "Bearer token-del-cliente");
+  } finally {
+    delete process.env["CONNECTORS_ALLOW_PRIVATE_NETWORK"];
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});

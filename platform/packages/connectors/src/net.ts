@@ -203,7 +203,20 @@ export interface FetchResult {
  */
 export async function safeFetch(
   raw: string,
-  options: { timeoutMs?: number; maxRedirects?: number; userAgent: string },
+  options: {
+    timeoutMs?: number;
+    maxRedirects?: number;
+    userAgent: string;
+    /**
+     * Credencial, atada a un origen.
+     *
+     * El origen NO es decoración: una redirección puede llevar a otro dominio,
+     * y mandar allí la cabecera entrega el token del cliente a un tercero. Es
+     * la misma clase de fallo que seguir redirecciones sin revalidar la IP, y
+     * pasa incluso sin mala intención — un enlace a un CDN, un acortador.
+     */
+    auth?: { origin: string; header: string };
+  },
 ): Promise<FetchResult> {
   const maxRedirects = options.maxRedirects ?? 5;
   let current = raw;
@@ -211,9 +224,19 @@ export async function safeFetch(
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const url = await assertFetchableUrl(current);
 
+    const headers: Record<string, string> = {
+      "user-agent": options.userAgent,
+      accept: "text/html,text/*,*/*",
+    };
+
+    // Solo al origen para el que se configuró. Al saltar fuera, se cae.
+    if (options.auth !== undefined && url.origin === options.auth.origin) {
+      headers["authorization"] = options.auth.header;
+    }
+
     const response = await fetch(url, {
       redirect: "manual",
-      headers: { "user-agent": options.userAgent, accept: "text/html,text/*,*/*" },
+      headers,
       signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
     });
 

@@ -312,6 +312,109 @@ describe(
       });
     });
 
+    test("el token de una fuente se guarda cifrado y NO sale por la API", async () => {
+      const creada = await app.inject({
+        method: "POST",
+        url: "/v1/sources",
+        headers: auth,
+        payload: {
+          name: "Intranet",
+          kind: "URL",
+          config: {
+            startUrls: [sitio],
+            delayMs: 0,
+            respectRobots: false,
+            authToken: "token-secretisimo-del-cliente",
+          },
+        },
+      });
+
+      assert.equal(creada.statusCode, 201);
+      const id = creada.json<{ id: string }>().id;
+
+      // 1. No sale en la respuesta de creación.
+      assert.ok(
+        !creada.body.includes("token-secretisimo"),
+        "el secreto no puede volver en la respuesta que lo guarda",
+      );
+
+      // 2. No sale al leerla, ni en claro ni cifrado.
+      const leida = await app.inject({
+        method: "GET",
+        url: `/v1/sources/${id}`,
+        headers: auth,
+      });
+      assert.ok(!leida.body.includes("token-secretisimo"));
+      assert.ok(
+        !leida.body.includes("enc.v1."),
+        "publicar el texto cifrado es publicar algo que solo depende de una " +
+          "clave, y las claves se filtran",
+      );
+      assert.match(leida.body, /secreto guardado/);
+
+      // 3. Ni en el listado.
+      const listado = await app.inject({ method: "GET", url: "/v1/sources", headers: auth });
+      assert.ok(!listado.body.includes("token-secretisimo"));
+
+      // 4. Pero en la base SÍ está, y cifrado.
+      const fila = await systemPrisma.knowledgeSource.findUniqueOrThrow({
+        where: { id },
+        select: { config: true },
+      });
+      const guardado = fila.config as Record<string, unknown>;
+      assert.ok(
+        typeof guardado["authToken"] === "string" &&
+          guardado["authToken"].startsWith("enc.v1."),
+        "el token tiene que estar cifrado en reposo",
+      );
+      assert.ok(
+        !JSON.stringify(guardado).includes("token-secretisimo"),
+        "FUGA: el token está en claro en la base y en todas las copias de seguridad",
+      );
+    });
+
+    test("cambiar otra parte de la configuración no borra el token", async () => {
+      const creada = await app.inject({
+        method: "POST",
+        url: "/v1/sources",
+        headers: auth,
+        payload: {
+          name: "Con token",
+          kind: "URL",
+          config: { startUrls: [sitio], authToken: "token-que-debe-sobrevivir" },
+        },
+      });
+      const id = creada.json<{ id: string }>().id;
+
+      // El cliente lee la configuración —redactada— y devuelve lo que leyó con
+      // una URL cambiada. Es el flujo natural de cualquier formulario.
+      const leida = await app.inject({
+        method: "GET",
+        url: `/v1/sources/${id}`,
+        headers: auth,
+      });
+      const config = leida.json<{ config: Record<string, unknown> }>().config;
+
+      await app.inject({
+        method: "PATCH",
+        url: `/v1/sources/${id}`,
+        headers: auth,
+        payload: { config: { ...config, maxPages: 25 } },
+      });
+
+      const fila = await systemPrisma.knowledgeSource.findUniqueOrThrow({
+        where: { id },
+        select: { config: true },
+      });
+      const guardado = fila.config as Record<string, string>;
+
+      assert.equal(guardado["maxPages"], 25);
+      assert.ok(
+        guardado["authToken"]?.startsWith("enc.v1."),
+        'sin esto, el cliente guardaría la palabra "«secreto guardado»" como su credencial',
+      );
+    });
+
     test("las fuentes de un tenant no se ven desde otro", async () => {
       const OTRO = "tnt_sync_rival1";
       await systemPrisma.tenant.upsert({

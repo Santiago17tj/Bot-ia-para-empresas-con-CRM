@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { runWithTenant, withRlsTransaction, type Prisma } from "@platform/db";
 import { ConnectorError, connectorFor, type DiscoveredDocument } from "@platform/connectors";
 import { EventHandlingError, publish, type DomainEvent } from "@platform/events";
+import { decryptConfigSecrets } from "@platform/secrets";
 import { documentKey, type StorageDriver } from "@platform/storage";
 
 /**
@@ -65,8 +66,16 @@ export function createSyncHandler(deps: {
       const connector = connectorFor(source.kind);
       let emitted = 0;
 
-      const { cursor, progress } = await connector.sync(
+      // Se descifra JUSTO antes de usarlo y no se guarda en ningún sitio: el
+      // token en claro vive lo que dura esta llamada.
+      const config = decryptConfigSecrets(
         (source.config ?? {}) as Record<string, unknown>,
+        connector.secretFields,
+        { tenantId: ctx.tenantId, purposePrefix: "source.config" },
+      );
+
+      const { cursor, progress } = await connector.sync(
+        config,
         {
           cursor: (source.syncCursor ?? {}) as Record<string, unknown>,
           log,

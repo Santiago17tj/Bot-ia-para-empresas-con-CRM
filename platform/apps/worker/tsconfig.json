@@ -28,6 +28,9 @@
     },
     {
       "path": "../../packages/connectors"
+    },
+    {
+      "path": "../../packages/secrets"
     }
   ]
 }
