@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   PromptNotFoundError,
+  parsePromptFile,
   pickDeployment,
   renderTemplate,
   usageFromGeneration,
@@ -147,4 +148,32 @@ test("el consumo de una generación se desglosa por métrica y guarda el coste",
   // sobre lo que costó entonces.
   assert.equal(byMetric.get("INPUT_TOKENS")?.cost, 0.0145);
   assert.equal(byMetric.get("INPUT_TOKENS")?.meta?.["model"], "claude-opus-5");
+});
+
+// ---------------------------------------------------------------------------
+// Catálogo de prompts
+// ---------------------------------------------------------------------------
+
+test("el mismo prompt da el mismo texto con CRLF que con LF", () => {
+  const lf =
+    "---\n" +
+    "key: prueba.finales\n" +
+    "version: 1\n" +
+    "description: Comprueba que el fin de línea no cambia la plantilla.\n" +
+    "variables: nombre\n" +
+    "---\n" +
+    "Primera línea.\n\nHola {{nombre}}.\n";
+
+  const conLf = parsePromptFile(lf, "prueba.lf.md");
+  const conCrlf = parsePromptFile(lf.replace(/\n/g, "\r\n"), "prueba.crlf.md");
+
+  // Sin normalizar, estos dos textos difieren en un byte por línea. Y como la
+  // versión es inmutable y el seed compara textos, sembrar desde Windows contra
+  // una base sembrada desde Linux aborta diciendo que "ya existe con un texto
+  // distinto" — verdad literal, cero explicación. Peor todavía: el prompt que
+  // recibe el modelo dependería de qué máquina sembró, y entonces la traza que
+  // archiva un versionId deja de identificar un texto.
+  assert.equal(conCrlf.template, conLf.template);
+  assert.ok(!conCrlf.template.includes("\r"), "quedó un retorno de carro");
+  assert.deepEqual(conCrlf.variables, ["nombre"]);
 });

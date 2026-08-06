@@ -74,7 +74,23 @@ export function parsePromptFile(source: string, filename: string): PromptFile {
     .map((v) => v.trim())
     .filter((v) => v !== "");
 
-  const template = body.trimEnd();
+  // Fines de línea normalizados a LF ANTES de nada más.
+  //
+  // Sin esto, el mismo fichero produce dos plantillas distintas según cómo lo
+  // haya dejado el checkout: 1915 caracteres en Linux y 1956 en Windows, mismo
+  // texto. Las consecuencias no son cosméticas. Una, que la versión es
+  // inmutable y el seed compara textos: sembrar desde Windows contra una base
+  // sembrada desde Linux aborta con "ya existe con un texto distinto", que es
+  // verdad y no explica nada. Dos, y peor, que el prompt que se le manda al
+  // modelo depende de la máquina que sembró — así que una traza que archiva un
+  // `versionId` deja de identificar un texto, que es justo lo que da a esa
+  // traza su valor. Visto de verdad en un worktree de Windows contra la base
+  // de desarrollo.
+  //
+  // Va aquí y no en un `.gitattributes` porque un `.gitattributes` arregla los
+  // checkouts futuros y no los que ya existen, y porque el registro debe ser
+  // insensible a esto aunque el fichero llegue de cualquier otra forma.
+  const template = body.replace(/\r\n/g, "\n").trimEnd();
 
   // Las variables declaradas y las usadas tienen que coincidir. Una declarada
   // de menos hace que `renderTemplate` lance en producción con un nombre que
