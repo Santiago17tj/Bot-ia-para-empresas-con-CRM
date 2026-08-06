@@ -113,6 +113,7 @@ DECLARE
     'knowledgeGap',
     'conversation',
     'message',
+    'contact',
     'aiTrace',
     'auditLog',
     'usageRecord',

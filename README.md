@@ -91,7 +91,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector, en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 377 tests
+npm test                       # 387 tests
 ```
 
 **`setup`, no `db:migrate`.** `prisma migrate dev` interpreta como deriva las
@@ -100,7 +100,7 @@ resetear la base; decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` más el SQL crudo, que es lo correcto y lo que usa CI.
 
 Esta secuencia está verificada contra un checkout limpio y un Postgres vacío, no
-solo escrita: desde cero hasta los 377 tests en verde.
+solo escrita: desde cero hasta los 387 tests en verde.
 
 Para levantarlo:
 
@@ -142,6 +142,7 @@ La clave se imprime una vez: la base solo guarda el hash SHA-256 y los cuatro
 | `POST /v1/sources/:id/sync` | Sincronizar ya → **202** |
 | `POST /v1/chat` | Conversación con continuidad |
 | `GET /v1/conversations/:id` · `POST .../status` | Hilo y escalada |
+| `GET`·`POST /v1/contacts` · `GET`·`PATCH /v1/contacts/:id` | Quién pregunta: identidad y datos de contacto |
 
 La ingesta responde 202 y no espera: embeber un manual de 200 páginas no cabe en
 un timeout HTTP. La fila del documento y el evento que lo pone en cola se
@@ -181,7 +182,7 @@ platform/           El monorepo
 | Paquete | |
 |---|---|
 | `env` | Carga del único `.env` de la raíz |
-| `db` | 27 modelos, aislamiento en 3 capas, RLS |
+| `db` | 28 modelos, aislamiento en 3 capas, RLS |
 | `providers` | Puertos `AIProvider` y `EmbeddingProvider`, 2 adaptadores |
 | `events` | Outbox transaccional y despachador |
 | `observability` | Trazas, Prompt Registry, siembra, consumo |
@@ -234,8 +235,12 @@ Se dice porque un README que solo enumera lo que funciona es publicidad:
 - **La sincronización programada se interpreta en UTC.** Una PYME española que
   escriba `0 3 * * *` sincroniza a las 4:00 locales en verano. Falta zona
   horaria por tenant.
-- **`/v1/contacts`** es lo último que falta de §27 para que la superficie de la
-  API quede completa.
+- **No hay CRM.** `/v1/contacts` guarda identidad y datos de contacto, que es lo
+  que pide §27 para esta fase. `Company`, oportunidades y sincronización con un
+  CRM externo son Fase 4 y no están empezadas.
+- **No hay panel ni canales.** A la API se llega con una clave emitida por línea
+  de comandos. `WHATSAPP` es hoy un valor del enum de canal de una conversación,
+  no una integración con Meta.
 - `xlsx`, `pptx` y el `.doc` antiguo se rechazan con un 415 que dice qué hacer.
 - Sin generador configurado, los huecos **no se agrupan**: cada abstención abre
   su fila. Peor informe, pero no es un dato perdido — y es mejor que agrupar con

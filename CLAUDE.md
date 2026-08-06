@@ -25,7 +25,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 377 tests
+npm test                       # 387 tests
 ```
 
 **`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
@@ -34,7 +34,7 @@ resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
 Esta secuencia está **verificada contra un checkout limpio y un Postgres
-vacío**, no solo escrita: desde cero hasta los 377 tests en verde.
+vacío**, no solo escrita: desde cero hasta los 387 tests en verde.
 
 Ese «checkout limpio» hay que decirlo aparte, porque durante doce ejecuciones de
 CI la secuencia estuvo rota y en local no se notaba. `apply-sql.ts` importa
@@ -123,7 +123,7 @@ el chat da continuidad entre turnos.
 | Paquete | Qué es | Tests |
 |---|---|---|
 | `env` | Carga del único `.env` de la raíz | — |
-| `db` | 27 modelos, aislamiento 3 capas, RLS | 11 + 9 int. |
+| `db` | 28 modelos, aislamiento 3 capas, RLS | 11 + 9 int. |
 | `providers` | `AIProvider` + `EmbeddingProvider`, 2 adaptadores | 23 |
 | `events` | Outbox transaccional + despachador | 11 |
 | `observability` | Trazas, Prompt Registry, siembra, consumo | 12 |
@@ -133,7 +133,7 @@ el chat da continuidad entre turnos.
 | `storage` | Costura de ficheros + driver local | 15 |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
 | `connectors` | Web, Notion, **Drive**, SSRF, cron | 101 |
-| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat` | 27 int. |
+| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat`, **`/v1/contacts`** | 37 int. |
 | `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
@@ -443,6 +443,7 @@ Sin ámbitos, la clave sale con los cinco por defecto: `knowledge:read`,
 | `POST /v1/sources/:id/sync` | Sincronizar ya → **202** |
 | `POST /v1/chat` | Conversación con continuidad |
 | `GET /v1/conversations/:id` · `POST .../status` | Hilo y escalada |
+| `GET`/`POST /v1/contacts` · `GET`/`PATCH /v1/contacts/:id` | Quién pregunta |
 
 La clave se imprime UNA vez: la base solo guarda el hash SHA-256 y los cuatro
 últimos caracteres. SHA-256 y no bcrypt a propósito — son 256 bits aleatorios,
@@ -486,7 +487,7 @@ integración se bloquean entre ellos y fallan por algo que no es el código.
 `.github/workflows/ci.yml`, dos jobs:
 
 - **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
-  ICU que `docker-compose.yml`. Ejecuta los 377 tests, integración incluida:
+  ICU que `docker-compose.yml`. Ejecuta los 387 tests, integración incluida:
   con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
 - **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
   secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
@@ -751,6 +752,47 @@ descargarlo. Aquí pesa más: un PDF de veinte megas se bajaría entero para nad
 **Verificado contra un servidor simulado**, con clave RSA generada en el propio
 test. Verifica nuestro código, no el comportamiento de Google.
 
+## Contactos
+
+`/v1/contacts` cierra la superficie de §27. Es el contacto **mínimo**: identidad
+y datos, para que varias conversaciones de la misma persona dejen de ser
+personas distintas. No es un CRM — `Company`, oportunidades y sincronización con
+un sistema externo son Fase 4 y se enganchan aquí.
+
+**Las unicidades son compuestas, y ese es el punto entero.** En `crm-main`,
+`Contact.email` es `@unique` GLOBAL, y eso es exactamente lo que lo hace
+irreparable: dos clientes distintos no pueden tener a la misma persona en su
+agenda. Hay test que lo comprueba en los dos sentidos — el mismo correo en dos
+tenants convive, y repetido dentro de uno da 409.
+
+**Un contacto sin email, teléfono ni `externalId` se rechaza con 400.** No se le
+puede volver a encontrar, así que la siguiente conversación crearía un duplicado
+en silencio, y un duplicado silencioso es peor que un error: rompe justo lo que
+el contacto viene a resolver.
+
+**`externalId` exige canal.** El mismo literal en WhatsApp y en Slack son dos
+personas distintas, y así lo dice la unicidad compuesta.
+
+**Borrar un contacto NO borra sus conversaciones**: la clave ajena es
+`SET NULL`. El historial de lo que se habló sobrevive al contacto, que es lo que
+hace auditable el borrado por contacto del RGPD (§28).
+
+`Conversation.externalUserId` se conserva junto a `contactId` y no se sustituye
+por él: es el dato CRUDO que entregó el canal, y es lo que permite reconstruir
+por qué se resolvió a este contacto y no a otro.
+
+**Los datos del cliente van en `attributes`, no en columnas nuevas.** Cada PYME
+quiere los suyos, y una columna por cliente no escala ni cabe en el AI Studio,
+que exige configuración declarativa (§27).
+
+Al escribir esto salió un fallo que afectaba a **toda** la API: el manejador de
+errores reenvolvía cualquier error con `statusCode` 4xx —incluidos los
+`ApiError` nuestros— y les borraba el `code`, así que `not_found`,
+`contact_exists` y todos los demás salían como `bad_request`. El `code` existe
+para que un cliente pueda ramificar sin leer el texto en español; uno que
+siempre vale lo mismo no es cosmético, es el campo entero sin servir para nada.
+Arreglado comprobando `instanceof ApiError` antes de normalizar.
+
 ## El chat
 
 **Es interfaz, no núcleo** — la regla del proyecto. La ruta no decide nada sobre
@@ -837,8 +879,8 @@ duro que cualquiera de los de un turno. Hace falta una tirada de `npm run eval`
 con `AI_PROVIDER="groq"` y una `GROQ_API_KEY` con valor en `platform/.env` — ver
 **Dónde viven las claves**.
 
-Después `/v1/contacts`, que es lo último de §27, y con ello la superficie de la
-API queda completa.
+`/v1/contacts` **ya está**, y con ello la superficie de la API de §27 queda
+completa. Ver **Contactos**.
 
 Deuda conocida: la sincronización programada se interpreta en **UTC**, así que
 una PYME española que ponga `0 3 * * *` sincroniza a las 4:00 locales en verano.

@@ -14,6 +14,7 @@ import {
 import { ApiError, toErrorResponse } from "./errors.js";
 import { RateLimiter } from "./rate-limit.js";
 import { registerChatRoutes } from "./routes/chat.js";
+import { registerContactRoutes } from "./routes/contacts.js";
 import { registerDocumentRoutes } from "./routes/documents.js";
 import { registerGapRoutes } from "./routes/gaps.js";
 import { registerHealthRoutes } from "./routes/health.js";
@@ -75,8 +76,18 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
     // además se registraba como fallo nuestro. El cliente no puede arreglar lo
     // que la API le dice que es un problema del servidor, y nosotros
     // perseguiríamos una alarma que no lo era.
+    //
+    // Un `ApiError` NUESTRO se deja intacto y esa comprobación va primero. Sin
+    // ella, esta normalización lo reenvolvía —también lleva `statusCode` 4xx— y
+    // le borraba el `code`: `contact_exists` y `not_found` salían los dos como
+    // `bad_request`. El `code` existe para que un cliente pueda ramificar sin
+    // leer el texto en español, así que uno que siempre vale lo mismo no es un
+    // detalle cosmético: es el campo entero sin servir para nada.
     const normalized =
-      error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500
+      !(error instanceof ApiError) &&
+      error.statusCode !== undefined &&
+      error.statusCode >= 400 &&
+      error.statusCode < 500
         ? new ApiError(
             error.statusCode,
             error.validation === undefined ? "bad_request" : "invalid_request",
@@ -146,6 +157,7 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
     await scope.register(registerGapRoutes);
     await scope.register(registerSourceRoutes);
     await scope.register(registerChatRoutes, injected);
+    await scope.register(registerContactRoutes);
   });
 
   return app;

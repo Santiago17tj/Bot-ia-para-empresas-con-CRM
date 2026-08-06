@@ -21,6 +21,7 @@ export const TENANT_SCOPED_MODELS = [
   "KnowledgeGap",
   "Conversation",
   "Message",
+  "Contact",
   "AITrace",
   "AuditLog",
   "UsageRecord",

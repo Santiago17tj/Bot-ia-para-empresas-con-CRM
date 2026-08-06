@@ -59,6 +59,7 @@ model Tenant {
   evalSuites       EvalSuite[]
   knowledgeGaps    KnowledgeGap[]
   conversations    Conversation[]
+  contacts         Contact[]
 
   @@map("tenant")
 }
@@ -336,9 +337,15 @@ model Conversation {
   // Permite que el mismo hilo externo no cree dos conversaciones cuando el
   // canal reintenta la entrega de un mensaje.
   externalId String?
-  // Quién pregunta, según el canal. Cuando exista `Contact` (§10) se enlazará
-  // aquí; hasta entonces es el identificador que traiga el canal.
+  // Quién pregunta, según el canal. Se conserva junto a `contactId` y no se
+  // sustituye por él: es el dato CRUDO que entregó el canal, y es lo que
+  // permite reconstruir por qué se resolvió a este contacto y no a otro.
   externalUserId String?
+
+  // Con quién se está hablando. Opcional porque una conversación puede empezar
+  // antes de saber quién es: por la API, o en un widget web anónimo.
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
 
   status       ConversationStatus @default(OPEN)
   messageCount Int                @default(0)
@@ -352,6 +359,56 @@ model Conversation {
   @@unique([tenantId, channel, externalId])
   @@index([tenantId, status, lastMessageAt])
   @@map("conversation")
+}
+
+/// Quién pregunta, más allá de un hilo suelto (§27).
+///
+/// Es el contacto MÍNIMO de Fase 2 y no un CRM: identidad y datos de contacto,
+/// para que varias conversaciones de la misma persona dejen de ser personas
+/// distintas. `Company`, oportunidades y sincronización con un CRM externo son
+/// Fase 4 y se enganchan aquí; meterlas ahora sería construir esa fase dentro
+/// de esta.
+///
+/// **Las unicidades son compuestas, y ese es el punto entero.** En `crm-main`
+/// —el repositorio de referencia— `Contact.email` es `@unique` global, y eso es
+/// exactamente lo que lo hace imposible de convertir en multi-tenant: dos
+/// clientes distintos no pueden tener en su agenda a la misma persona. No es un
+/// detalle de rendimiento, es la diferencia entre un producto y una demo.
+model Contact {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  displayName String?
+  email       String?
+  phone       String?
+
+  /// Identificador nativo del canal por el que apareció: el número de
+  /// WhatsApp, el id de usuario de Slack. Se guarda junto al canal porque el
+  /// mismo literal en dos canales distintos no es la misma persona.
+  externalId String?
+  channel    ConversationChannel?
+
+  /// Notas y campos del cliente. Aquí y no en columnas nuevas: cada PYME quiere
+  /// los suyos, y una columna por cliente no escala ni cabe en el AI Studio,
+  /// que exige configuración declarativa (§27).
+  attributes Json @default("{}")
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  lastSeenAt DateTime @default(now())
+
+  conversations Conversation[]
+
+  // Compuestas SIEMPRE. Ver la nota de arriba.
+  //
+  // Postgres admite varias filas con NULL en un índice único, que es justo lo
+  // que hace falta: un contacto sin correo no debe chocar con otro sin correo.
+  @@unique([tenantId, email])
+  @@unique([tenantId, phone])
+  @@unique([tenantId, channel, externalId])
+  @@index([tenantId, lastSeenAt])
+  @@map("contact")
 }
 
 /**

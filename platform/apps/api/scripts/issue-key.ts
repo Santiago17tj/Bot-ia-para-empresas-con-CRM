@@ -21,6 +21,8 @@ const DEFAULT_SCOPES = [
   "knowledge:write",
   "chat:read",
   "chat:write",
+  "contacts:read",
+  "contacts:write",
 ];
 
 async function main(): Promise<void> {
