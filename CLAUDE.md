@@ -33,8 +33,15 @@ columnas que añade el SQL crudo —vectores, tsvector, políticas RLS— y ofre
 resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
-Esta secuencia está **verificada contra un Postgres vacío**, no solo escrita:
-desde cero hasta los 377 tests en verde.
+Esta secuencia está **verificada contra un checkout limpio y un Postgres
+vacío**, no solo escrita: desde cero hasta los 377 tests en verde.
+
+Ese «checkout limpio» hay que decirlo aparte, porque durante doce ejecuciones de
+CI la secuencia estuvo rota y en local no se notaba. `apply-sql.ts` importa
+`@platform/env/load`, que vive en `dist/`, y `setup` corría antes de compilar
+nada: en una máquina de desarrollo el `dist/` ya estaba de la vez anterior, y en
+un runner recién clonado no. Arreglado haciendo que `apply-sql` compile primero,
+como ya hacían `test`, `eval` y `prompts:seed`. Ver **La CI nunca había pasado**.
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
 
@@ -130,7 +137,9 @@ el chat da continuidad entre turnos.
 | `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
-**Estado actual del arnés**), y CI lo ejecuta todo en cada push.
+**Estado actual del arnés**). CI lo ejecuta en cada push — desde que se arregló,
+porque durante doce ejecuciones no ejecutó nada. Ver **La CI nunca había
+pasado**.
 
 ## Invariantes que NO se pueden romper
 
@@ -489,6 +498,40 @@ base. Ver el apartado de migraciones.
 
 La secuencia entera está verificada contra una base vacía en un contenedor
 aparte, no solo escrita.
+
+### La CI nunca había pasado
+
+Doce ejecuciones, doce fallos, desde la primera. Nadie lo miró porque el
+documento decía que CI ejecutaba todo en cada push, y eso se leía como que
+pasaba.
+
+El error, siempre el mismo:
+
+```
+Cannot find module '.../platform/node_modules/@platform/env/dist/load.js'
+imported from '.../platform/packages/db/scripts/apply-sql.ts'
+```
+
+`apply-sql.ts` importa `@platform/env/load`, que se resuelve a `dist/load.js`, y
+el paso «Preparar la base de datos» iba **antes** que «Compilar». En un runner
+recién clonado no hay `dist/`; en una máquina de desarrollo sí, de la última vez
+que se compiló, así que en local nunca falla. Ese es el motivo entero de que
+durara doce ejecuciones.
+
+Arreglado en `apply-sql`, que ahora compila primero — igual que ya hacían `test`,
+`eval` y `prompts:seed`. Ahí y no reordenando los pasos del workflow porque el
+mismo agujero se lo comía **cualquiera que clonara el repositorio**: la secuencia
+de arranque documentada tampoco tenía un `build` antes de `setup`.
+
+Lo caro no fue el fallo, fue lo que tapaba. El job del arnés declara
+`needs: test`, así que **nunca llegó a ejecutarse**: la puerta que existe para
+bloquear despliegues no había bloqueado ni aprobado nada, y el `GROQ_API_KEY`
+que hay guardado como secreto no lo había leído nadie. El comentario que
+encabeza `ci.yml` —«una puerta que nadie abre no bloquea nada»— seguía siendo
+verdad después de escribirlo.
+
+Si algún día vuelve a fallar, el log está en Actions y hay que abrir el job para
+verlo: el resumen del run solo dice «Process completed with exit code 1».
 
 ## Los conversores binarios
 

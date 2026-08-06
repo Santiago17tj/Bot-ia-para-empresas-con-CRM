@@ -99,7 +99,8 @@ columnas que añade el SQL crudo —vectores, `tsvector`, políticas RLS— y of
 resetear la base; decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` más el SQL crudo, que es lo correcto y lo que usa CI.
 
-Esta secuencia está verificada contra un Postgres vacío, no solo escrita.
+Esta secuencia está verificada contra un checkout limpio y un Postgres vacío, no
+solo escrita: desde cero hasta los 377 tests en verde.
 
 Para levantarlo:
 

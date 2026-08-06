@@ -16,7 +16,7 @@
     "migrate": "prisma migrate dev",
     "deploy": "prisma migrate deploy",
     "reset": "prisma migrate reset --force && npm run apply-sql",
-    "apply-sql": "node --experimental-strip-types scripts/apply-sql.ts",
+    "apply-sql": "npm run build && node --experimental-strip-types scripts/apply-sql.ts",
     "setup": "prisma migrate deploy && npm run apply-sql",
     "studio": "prisma studio",
     "postinstall": "prisma generate"
