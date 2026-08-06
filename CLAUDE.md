@@ -25,7 +25,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 370 tests
+npm test                       # 377 tests
 ```
 
 **`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
@@ -34,7 +34,7 @@ resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
 Esta secuencia está **verificada contra un Postgres vacío**, no solo escrita:
-desde cero hasta los 370 tests en verde.
+desde cero hasta los 377 tests en verde.
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
 
@@ -119,10 +119,10 @@ el chat da continuidad entre turnos.
 | `db` | 27 modelos, aislamiento 3 capas, RLS | 11 + 9 int. |
 | `providers` | `AIProvider` + `EmbeddingProvider`, 2 adaptadores | 23 |
 | `events` | Outbox transaccional + despachador | 11 |
-| `observability` | Trazas, Prompt Registry, siembra, consumo | 11 |
+| `observability` | Trazas, Prompt Registry, siembra, consumo | 12 |
 | `context` | Context Engine, presupuesto, recetas | 22 |
 | `knowledge` | Conversión, troceado, híbrida, grounding, respuesta, huecos, **conversación** | 58 + 28 int. |
-| `eval` | Arnés con abstención, modo `full` | 6 int. |
+| `eval` | Arnés con abstención, **conversación**, modo `full` | 12 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
 | `connectors` | Web, Notion, **Drive**, SSRF, cron | 101 |
@@ -148,7 +148,7 @@ Hay **dos excepciones sancionadas**, y ninguna de las dos es una petición:
 credencial, que es justo lo que aún no se sabe— y el planificador, que por
 definición mira todos los tenants para saber a quién le toca sincronizar. Las
 dos están encapsuladas con nombre propio para poder auditarlas leyendo quién las
-llama. Ver **Tres trampas de este entorno**.
+llama. Ver **Cuatro trampas de este entorno**.
 
 **`publish()` exige el cliente de transacción del llamante.** Es la garantía
 entera del outbox: si abriera su propia conexión, podría confirmarse mientras el
@@ -267,6 +267,34 @@ comparten casi todo el vector aunque pidan cosas opuestas. No hay umbral.
 Por eso los huecos se agrupan con el generador y el vector solo preselecciona
 candidatos. Si alguien vuelve a poner un umbral ahí, esta tabla dice por qué no.
 
+**La reescritura mueve la pregunta de la banda "sin respuesta" a la banda
+"respondible".** Medido en `packages/eval/scripts/calibrate-followups.mjs`:
+
+| Seguimiento | Crudo | Reescrito |
+|---|---|---|
+| «¿Y a Canarias?» | 0,824 | **0,928** |
+| «¿Y si ya lo he usado?» | 0,794 | **0,859** |
+| «¿Qué garantía…?» (ya se entendía sola) | 0,887 | 0,887 |
+
+Compárense con la tabla de calibración de arriba: 0,824 y 0,794 caen dentro de
+la banda de las preguntas SIN respuesta (0,775–0,846); 0,928 y 0,859 caen dentro
+de la de las respondibles (0,853–0,927). O sea que un seguimiento sin reescribir
+no es solo "peor consulta": **se parece a una pregunta que el corpus no cubre**.
+
+**Y aun así, sobre este corpus la recuperación no lo nota.** El mismo script lo
+dice: 0 de 3 casos cambian de fragmentos al reescribir. No es que la reescritura
+sobre — es que el corpus de referencia tiene **cinco fragmentos** y se piden
+tres, así que cada consulta devuelve el 60% de todo lo que hay y el fragmento
+bueno está en la lista se pregunte como se pregunte.
+
+Esto costó un test falso: se escribió uno que afirmaba «un seguimiento sin
+reescribir no recupera la respuesta», y falló, porque sobre este corpus sí la
+recupera. Lo que hay en su lugar comprueba lo que sí se puede comprobar —que el
+ejecutor busca el texto REESCRITO— reescribiendo a propósito hacia otro tema. El
+valor de la reescritura en este conjunto se mide en modo `full`, en lo que el
+generador hace con el TEXTO de la pregunta. Un corpus más grande volvería a
+separar; el script es cómo se comprueba.
+
 **El `.env` seleccionaba embeddings de OpenAI mientras todo se medía con el
 local.** `EMBEDDING_PROVIDER=openai` con la clave vacía, frente a los 384d de
 `multilingual-e5-small` sobre los que se calibró todo lo de arriba. Los tests no
@@ -278,7 +306,12 @@ si llegara a funcionar mediría un sistema distinto del calibrado.
 
 ## Estado actual del arnés
 
-Medición real, modo `full`, contra Postgres y Groq (`openai/gpt-oss-120b`):
+Medición real, modo `full`, contra Postgres y Groq (`openai/gpt-oss-120b`).
+
+**Esta cifra es de ANTES de los casos conversacionales.** Son 10 casos; hoy el
+conjunto tiene 14. Volver a medirla con Groq es el primer punto de **Próximo
+paso** — hasta entonces, léase como el número del conjunto de un turno, que
+sigue siendo válido para lo que mide.
 
 ```
 Recall@k              100.0%  (6 casos)
@@ -357,6 +390,20 @@ estaba en el fragmento) y la red lo tumbó a abstención. Bloquea, y es correcto
 en el peor caso sobre CPU. Ese cliente necesita GPU, y ahora se puede decir con
 un número antes de firmar.
 
+**Para repetir la tirada local hay que subir el timeout.** El del adaptador son
+120 s por defecto, y el comentario del código dice que es generoso a propósito
+«porque un timeout corto convierte lento en roto y el arnés lo contaría como
+abstención». No lo es bastante para esta misma tabla: **120 s está por debajo
+del p50 del 7B (134 s)**, así que la medición muere con «The operation was
+aborted due to timeout» antes de llegar al informe. Se sube con `AI_TIMEOUT_MS`:
+
+```bash
+AI_PROVIDER=ollama AI_TIMEOUT_MS=900000 npm run eval
+```
+
+Contra Groq no aparece —p95 de 15 s— así que solo muerde en el camino
+on-premise, que es justo el que se prueba menos.
+
 ## La API
 
 ```bash
@@ -423,7 +470,7 @@ integración se bloquean entre ellos y fallan por algo que no es el código.
 `.github/workflows/ci.yml`, dos jobs:
 
 - **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
-  ICU que `docker-compose.yml`. Ejecuta los 199 tests, integración incluida:
+  ICU que `docker-compose.yml`. Ejecuta los 377 tests, integración incluida:
   con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
 - **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
   secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
@@ -691,10 +738,37 @@ conversación nueva.
 **Toda abstención del chat también alimenta los huecos**, y se registra la
 pregunta RESUELTA: «¿y a Canarias?» en un informe no le dice nada a nadie.
 
-**Limitación honesta:** el arnés mide un solo turno. La reescritura está probada
-—incluido el caso de la misma pregunta con y sin hilo— pero no medida contra una
-puerta de calidad. Extender el conjunto con casos conversacionales es lo que
-convertiría esto en medido.
+**Ya pasa por la puerta.** El arnés medía un solo turno; ahora
+`CONVERSATIONAL_CASES` añade cuatro casos con hilo y `minFollowUpResolution`
+(0,8) los juzga. Son cuatro y cubren las cuatro cosas distintas que puede hacer
+esta capa:
+
+| Caso | Qué atrapa |
+|---|---|
+| `hilo-canarias` | El seguimiento canónico: "¿y a Canarias?" sin antecedente |
+| `hilo-usado` | El seguimiento salta de sección dentro del mismo tema |
+| `hilo-autonoma` | **Reescribir de más.** Hay hilo pero la pregunta se entendía sola |
+| `hilo-sin-reembolso` | La trampa, con el modelo habiendo citado bien el turno anterior |
+
+Ojo con lo que estos casos miden y lo que no: sobre ESTE corpus la reescritura
+no cambia qué fragmentos se recuperan —cinco fragmentos, se piden tres— así que
+lo que juzgan es lo que el generador hace con el TEXTO de la pregunta. Está
+medido, con números, en **Hallazgos medidos**.
+
+El tercero importa tanto como el primero y es el que casi no se escribe: un
+reescritor que reformula preguntas que ya estaban bien recupera peor **sin que
+salte ninguna otra métrica**. Por eso `expectsRewrite` se declara en los dos
+sentidos y el fallo se cuenta en las dos direcciones.
+
+**Un caso conversacional sin reescritor NO se ejecuta.** Buscar «¿y a Canarias?»
+literal mide el sistema roto que la reescritura existe para evitar, y esa
+abstención entraría en el informe como si describiera el producto. El ejecutor
+los salta, los lista en `report.skipped` y avisa; las métricas se calculan solo
+sobre lo que corrió, así que `total` nunca cuenta un caso que nadie miró.
+
+La reescritura entra en el coste y en la latencia del caso, incluida la de las
+abstenciones que corta el umbral: es una llamada al modelo que el cliente paga
+en cada turno de seguimiento, aunque después no se genere nada.
 
 ## Próximo paso
 
@@ -706,8 +780,11 @@ con servidor simulado no pueden cubrir, y son dos ratos cortos:
 - Drive: cuenta de servicio en Google Cloud, habilitar la API de Drive,
   compartir una carpeta con su correo, pegar el JSON.
 
-**Casos conversacionales en el arnés.** Hoy mide un turno; la reescritura de
-seguimientos es la única decisión de calidad del chat y no pasa por la puerta.
+**Volver a medir la puerta con Groq.** Los casos conversacionales ya están y los
+tests pasan, pero la cifra de la tabla de "Estado actual del arnés" es de ANTES
+de añadirlos: son cuatro casos más, y uno de ellos —`hilo-sin-reembolso`— es más
+duro que cualquiera de los de un turno. Hace falta una tirada con
+`AI_PROVIDER=groq GROQ_API_KEY=...` para actualizarla.
 
 Después `/v1/contacts`, que es lo último de §27, y con ello la superficie de la
 API queda completa.
@@ -742,9 +819,12 @@ npm run eval
   la respuesta, y ya funciona.
 - **Prisma 6.19 vs 7.x.** Se arrancó en 6.19 por estabilidad.
 - **`.gitattributes`.** Git avisa de conversión LF→CRLF; sin él, un equipo mixto
-  verá ficheros enteros como modificados sin tocarlos.
+  verá ficheros enteros como modificados sin tocarlos. Ya dejó de ser solo
+  cosmético una vez: rompió la siembra de prompts (ver **Cuatro trampas**). Eso
+  está arreglado donde tocaba —en el parser, no en git— pero el aviso sigue en
+  pie para el resto de ficheros.
 
-## Tres trampas de este entorno
+## Cuatro trampas de este entorno
 
 **`prisma generate` falla con EPERM si hay un proceso vivo con el cliente
 cargado.** Windows bloquea `query_engine-windows.dll.node` y el renombrado del
@@ -761,6 +841,22 @@ error ni traza. El síntoma es la ausencia de síntoma.
 Las dos excepciones sancionadas a "el cliente que se salta RLS no aparece en la
 ruta de una petición" son `findApiKeyByHash` y el planificador. Ninguna de las
 dos es una petición.
+
+**El fin de línea del checkout cambiaba el prompt.** El catálogo se lee de
+ficheros `.md`, y un checkout de Windows los deja con CRLF: el mismo
+`knowledge.answer.system` mide 1915 caracteres con LF y **1956 con CRLF**. Como
+las versiones son inmutables y la siembra compara textos, sembrar desde un
+worktree de Windows contra una base sembrada con LF aborta con «ya existe con un
+texto distinto» — verdad literal y ninguna pista. Y el fallo de fondo es peor
+que la molestia: el prompt que recibe el modelo dependía de qué máquina sembró,
+así que una traza que archiva un `versionId` dejaba de identificar un texto, que
+es exactamente lo que le da su valor.
+
+Arreglado en `parsePromptFile`, que normaliza a LF antes de nada. Ahí y no en un
+`.gitattributes` porque un `.gitattributes` arregla los checkouts futuros y no
+los que ya existen, y porque el registro debe ser insensible a esto aunque el
+fichero llegue de cualquier otra forma. Pasó de verdad al abrir un worktree para
+los casos conversacionales: 23 tests cancelados, ninguno relacionado.
 
 **Las transacciones expiran por el event loop, no por su propio trabajo.** El
 proveedor de embeddings local corre ONNX en el hilo principal y lo bloquea

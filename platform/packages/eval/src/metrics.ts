@@ -9,10 +9,36 @@
 
 export type CaseKind = "ANSWERABLE" | "UNANSWERABLE" | "FORBIDDEN";
 
+/** Un turno anterior del hilo. Mismo tipo que `@platform/knowledge`, sin importarlo. */
+export interface EvalTurn {
+  role: "USER" | "ASSISTANT";
+  content: string;
+}
+
 export interface EvalCase {
   id: string;
   kind: CaseKind;
   question: string;
+  /**
+   * Turnos anteriores del hilo. Su presencia convierte el caso en
+   * **conversacional**: lo que se busca ya no es `question`, sino lo que
+   * devuelva la reescritura.
+   *
+   * Un caso conversacional NO se puede medir sin reescritor. Buscar «¿y a
+   * Canarias?» literal mide el sistema roto que la reescritura existe para
+   * evitar, y su cifra —una abstención— entraría en el informe como si
+   * describiera el producto. El ejecutor los salta y lo dice.
+   */
+  history?: EvalTurn[];
+  /**
+   * Si la reescritura DEBÍA activarse.
+   *
+   * Se declara en los dos sentidos y no solo en `true`: un reescritor que
+   * reformula preguntas que ya se entendían solas recupera peor sin que
+   * ninguna otra métrica lo note necesariamente, y ese es el fallo silencioso
+   * de esta capa. Solo tiene sentido junto a `history`.
+   */
+  expectsRewrite?: boolean;
   /** Fragmentos o documentos que DEBERÍAN recuperarse. Solo para ANSWERABLE. */
   expectedSources?: string[];
   /** Texto que la respuesta correcta debería contener. */
@@ -43,6 +69,17 @@ export interface CaseOutcome {
    * conjunto sin `expectedSources` no mide recall y lo reporta como 100%.
    */
   sourceFound?: boolean;
+
+  /**
+   * Lo que se buscó de verdad. Solo en casos conversacionales.
+   *
+   * Se archiva por el mismo motivo que la ruta de chat archiva la pregunta
+   * resuelta: depurar por qué el tercer turno salió raro sin saber qué se
+   * buscó es adivinar.
+   */
+  resolvedQuestion?: string;
+  /** Si la reescritura se activó. `undefined` si el caso no es conversacional. */
+  rewritten?: boolean;
 }
 
 export interface Metrics {
@@ -94,6 +131,23 @@ export interface Metrics {
 
   /** Respuestas que fallaron la validación de citas. */
   groundingFailureRate: number;
+
+  /**
+   * De los casos conversacionales que lo declaran: ¿la reescritura hizo lo que
+   * debía —activarse en un seguimiento, no activarse en una pregunta que ya se
+   * entendía sola—?
+   *
+   * Es la única decisión de calidad del chat, y hasta ahora no pasaba por
+   * ninguna puerta. Va aparte de recall y de abstención porque explica el
+   * PORQUÉ de las dos: un seguimiento sin reescribir se abstiene de algo que el
+   * sistema sabe, y con esta métrica el informe distingue "no recuperó" de "no
+   * entendió la pregunta".
+   */
+  followUpResolution: number;
+  /** Sobre cuántos casos se pudo calcular. Ver `recallCases`. */
+  followUpCases: number;
+  /** Qué casos resolvieron el seguimiento al revés de lo declarado. */
+  followUpFailures: string[];
 
   latencyP50: number;
   latencyP95: number;
@@ -207,6 +261,22 @@ export function computeMetrics(
     if (mustNot.some((term) => response.includes(term.toLowerCase()))) violations++;
   }
 
+  // --- Reescritura de seguimientos -----------------------------------------
+  // Solo cuentan los casos que declaran qué esperaban Y que se ejecutaron con
+  // reescritor. Un caso conversacional saltado no aparece en `outcomes`, así
+  // que no infla ni hunde este número: simplemente no lo mide, y el ejecutor
+  // dice cuántos saltó.
+  const followUpFailures: string[] = [];
+  let followUpCases = 0;
+
+  for (const outcome of outcomes) {
+    const expected = byId.get(outcome.caseId)?.expectsRewrite;
+    if (expected === undefined || outcome.rewritten === undefined) continue;
+
+    followUpCases++;
+    if (outcome.rewritten !== expected) followUpFailures.push(outcome.caseId);
+  }
+
   const withFailures = outcomes.filter(
     (o) => (o.groundingFailures?.length ?? 0) > 0,
   ).length;
@@ -233,6 +303,9 @@ export function computeMetrics(
     overAbstention: answerable.length === 0 ? 0 : overAbstained / answerable.length,
     forbiddenViolations: violations,
     groundingFailureRate: outcomes.length === 0 ? 0 : withFailures / outcomes.length,
+    followUpResolution: ratio(followUpCases - followUpFailures.length, followUpCases),
+    followUpCases,
+    followUpFailures,
     latencyP50: percentile(latencies, 50),
     latencyP95: percentile(latencies, 95),
     totalCost: outcomes.reduce((sum, o) => sum + o.cost, 0),
@@ -252,6 +325,16 @@ export interface Thresholds {
    * más peligrosa que una alucinación descarada: pasa la validación de citas.
    */
   maxWrongAnswerRate: number;
+  /**
+   * Reescritura de seguimientos acertada.
+   *
+   * Tiene puerta porque es la única decisión de calidad del chat, y una capa
+   * que no pasa por una puerta se degrada sin que nadie se entere. Lo que NO
+   * es, es una puerta fina: con un puñado de casos conversacionales, un fallo
+   * mueve el porcentaje veinte puntos. Sirve para detectar que la capa se
+   * rompió, no para afinarla.
+   */
+  minFollowUpResolution: number;
 }
 
 /**
@@ -268,6 +351,7 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   maxOverAbstention: 0.25,
   maxGroundingFailureRate: 0.05,
   maxWrongAnswerRate: 0,
+  minFollowUpResolution: 0.8,
 };
 
 export interface GateResult {
@@ -327,6 +411,21 @@ export function evaluateGate(
         pct(thresholds.maxGroundingFailureRate),
     );
   }
+  // Como con recall: solo se juzga lo que se midió. Un conjunto sin casos
+  // conversacionales —o ejecutado sin reescritor— no aprueba esta puerta, la
+  // deja sin evaluar, y el aviso del conjunto dice cuántos casos se saltaron.
+  if (
+    metrics.followUpCases > 0 &&
+    metrics.followUpResolution < thresholds.minFollowUpResolution
+  ) {
+    failures.push(
+      `Reescritura de seguimientos ${pct(metrics.followUpResolution)} por debajo del ` +
+        `mínimo ${pct(thresholds.minFollowUpResolution)} — falló en: ` +
+        `${metrics.followUpFailures.join(", ")}. Un seguimiento sin reescribir se ` +
+        "busca literal («¿y a Canarias?» no se parece a ninguna frase de ningún " +
+        "manual) y el sistema se abstiene de algo que sabe.",
+    );
+  }
   if (metrics.forbiddenViolations > 0) {
     failures.push(
       `${metrics.forbiddenViolations} violación(es) de prohibiciones del ADN. ` +
@@ -366,6 +465,32 @@ export function assessSuiteComposition(cases: EvalCase[]): string[] {
         "expectedContains ni expectedSources, así que de ellos solo se sabe si " +
         "hubo respuesta, no si era correcta: " +
         sinEsperado.map((c) => c.id).join(", "),
+    );
+  }
+
+  const sinExpectativaDeReescritura = cases.filter(
+    (c) => (c.history ?? []).length > 0 && c.expectsRewrite === undefined,
+  );
+  if (sinExpectativaDeReescritura.length > 0) {
+    warnings.push(
+      `${sinExpectativaDeReescritura.length} caso(s) conversacional(es) no ` +
+        "declaran expectsRewrite, así que de ellos no se mide la única decisión " +
+        "de calidad del chat: " +
+        sinExpectativaDeReescritura.map((c) => c.id).join(", "),
+    );
+  }
+
+  // Y la simétrica: declarar `expectsRewrite` sin hilo no mide nada, porque sin
+  // turnos anteriores no hay reescritura que activar. Sin este aviso, el caso
+  // se queda fuera de `followUpCases` en silencio y su autor cree que lo cubrió.
+  const expectativaSinHilo = cases.filter(
+    (c) => c.expectsRewrite !== undefined && (c.history ?? []).length === 0,
+  );
+  if (expectativaSinHilo.length > 0) {
+    warnings.push(
+      `${expectativaSinHilo.length} caso(s) declaran expectsRewrite sin hilo, y ` +
+        "sin turnos anteriores no hay reescritura que medir: " +
+        expectativaSinHilo.map((c) => c.id).join(", "),
     );
   }
 

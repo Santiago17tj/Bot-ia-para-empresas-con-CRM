@@ -9,10 +9,11 @@ import { createAIProvider, createEmbeddingProvider } from "@platform/providers";
 
 import {
   createGenerator,
+  createResolver,
   formatReport,
   runSuite,
-  CUSTOMER_SUPPORT_CASES,
   CUSTOMER_SUPPORT_CORPUS,
+  FULL_SUITE_CASES,
 } from "@platform/eval";
 
 /**
@@ -84,13 +85,17 @@ async function main() {
       ),
     );
 
-    console.log(`[eval] generando ${CUSTOMER_SUPPORT_CASES.length} respuestas…`);
+    console.log(`[eval] generando ${FULL_SUITE_CASES.length} respuestas…`);
     const report = await runSuite({
       tenantId: TENANT,
-      cases: CUSTOMER_SUPPORT_CASES,
+      cases: FULL_SUITE_CASES,
       embedder,
       mode: "full",
       generate: createGenerator({ tenantId: TENANT, provider }),
+      // Sin esto, los casos conversacionales se saltarían y la reescritura de
+      // seguimientos —la única decisión de calidad del chat— seguiría sin pasar
+      // por ninguna puerta.
+      resolve: createResolver({ tenantId: TENANT, provider }),
       generator: { provider: provider.id, model: provider.model },
     });
 
@@ -106,6 +111,15 @@ async function main() {
           `${outcome.answered ? "respondió" : "se abstuvo"}  ` +
           `${outcome.citations?.length ?? 0} cita(s)  ${outcome.latencyMs} ms`,
       );
+      // Qué se buscó de verdad. En un caso conversacional, la respuesta sin
+      // esto no se puede diagnosticar: no se sabe si falló la reescritura, la
+      // recuperación o el generador.
+      if (outcome.resolvedQuestion !== undefined) {
+        console.log(
+          `      ↻ buscó: "${outcome.resolvedQuestion}"` +
+            `  (${outcome.rewritten === true ? "reescrita" : "tal cual"})`,
+        );
+      }
       if (outcome.response !== undefined) {
         console.log(`      → ${outcome.response.replace(/\s+/g, " ").slice(0, 140)}`);
       }
