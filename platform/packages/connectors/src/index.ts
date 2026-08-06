@@ -12,6 +12,15 @@ export {
 } from "./net.js";
 export type { FetchResult } from "./net.js";
 
+export {
+  parseCron,
+  cronMatches,
+  isValidCron,
+  minuteOf,
+  CronError,
+} from "./cron.js";
+export type { CronExpression } from "./cron.js";
+
 export { ConnectorError } from "./types.js";
 export type {
   DiscoveredDocument,

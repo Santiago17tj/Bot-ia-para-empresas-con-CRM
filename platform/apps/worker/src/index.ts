@@ -7,6 +7,7 @@ import { createStorage } from "@platform/storage";
 
 import { createGapHandler } from "./gap-handler.js";
 import { createIngestHandler } from "./ingest-handler.js";
+import { runDueSyncs } from "./scheduler.js";
 import { createSyncHandler } from "./sync-handler.js";
 
 export { createGapHandler } from "./gap-handler.js";
@@ -14,6 +15,8 @@ export type { GapPayload } from "./gap-handler.js";
 export { createIngestHandler } from "./ingest-handler.js";
 export type { UploadedPayload } from "./ingest-handler.js";
 export { createSyncHandler } from "./sync-handler.js";
+export { runDueSyncs } from "./scheduler.js";
+export type { SchedulerResult } from "./scheduler.js";
 
 /**
  * Worker de ingesta.
@@ -104,6 +107,9 @@ if (isEntrypoint) {
     // entrega dejó trabajo reclamado que nadie va a terminar, y sin esto la
     // cola no crece — simplemente ese documento no se indexa nunca.
     await dispatcher.reclaimExpired();
+    // El planificador va ANTES de vaciar la cola: lo que dispare este minuto se
+    // procesa en la misma pasada en vez de esperar a la siguiente.
+    await runDueSyncs(new Date(), (message) => console.log(message));
     await dispatcher.drainAll();
   };
 

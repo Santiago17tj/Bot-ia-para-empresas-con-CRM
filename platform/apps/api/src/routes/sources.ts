@@ -2,7 +2,12 @@ import type { FastifyInstance } from "fastify";
 
 import type { Prisma } from "@platform/db";
 import { publish } from "@platform/events";
-import { ConnectorError, availableConnectors, connectorFor } from "@platform/connectors";
+import {
+  ConnectorError,
+  availableConnectors,
+  connectorFor,
+  parseCron,
+} from "@platform/connectors";
 
 import { requireScope } from "../auth.js";
 import { ApiError } from "../errors.js";
@@ -114,6 +119,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
       // Se valida ANTES de guardar. Una fuente mal configurada que se acepta al
       // crearla falla la primera noche que sincroniza, cuando nadie mira.
       const validated = validateOrFail(kind, config);
+      assertValidSchedule(syncSchedule);
 
       const source = await readInTenant(request.tenantCtx, (tx) =>
         tx.knowledgeSource.create({
@@ -140,6 +146,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
 
       const existing = await findOrFail(request.tenantCtx, request.params.id);
       const { name, config, syncSchedule, isActive } = request.body;
+      assertValidSchedule(syncSchedule);
 
       const updated = await readInTenant(request.tenantCtx, (tx) =>
         tx.knowledgeSource.update({
@@ -223,6 +230,26 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
     const source = await findOrFail(request.tenantCtx, request.params.id);
     return reply.send(source);
   });
+}
+
+/**
+ * Un cron inválido se rechaza al guardarlo.
+ *
+ * Aceptarlo produce una fuente que no sincroniza nunca, y el síntoma —"mi web
+ * no se actualiza"— aparece días después sin nada que lo explique.
+ */
+function assertValidSchedule(schedule: string | null | undefined): void {
+  if (schedule === undefined || schedule === null || schedule.trim() === "") return;
+
+  try {
+    parseCron(schedule);
+  } catch (error) {
+    throw new ApiError(
+      400,
+      "invalid_schedule",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 /**

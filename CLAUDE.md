@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 270 tests
+npm test               # 300 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -69,9 +69,9 @@ de punta a punta.
 | `knowledge` | Conversión (PDF/DOCX), troceado, híbrida, grounding, respuesta, **huecos** | 58 + 28 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
-| `connectors` | Costura de orígenes + rastreador web, defensa SSRF | 41 |
+| `connectors` | Orígenes, rastreador web, defensa SSRF, cron | 63 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources` | 14 int. |
-| `apps/worker` | Despachador del outbox, ingesta, huecos, sincronización | 16 int. |
+| `apps/worker` | Outbox, ingesta, huecos, sincronización, **planificador** | 24 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
 **Estado actual del arnés**). La API sirve `/v1/knowledge/search`, `/answer` y
@@ -446,13 +446,35 @@ El cursor guarda el hash por URL: la segunda pasada no vuelve a pagar troceado
 ni embeddings de lo que no cambió. Sin eso, una sincronización nocturna cuesta
 dinero cada noche por nada.
 
+## El planificador
+
+`syncSchedule` guarda un cron y ahora lo lee el worker en cada sondeo. Sin esto,
+"el conocimiento siempre al día" era un botón que alguien tenía que pulsar.
+
+**Se sondea, no se programan temporizadores.** Un `setTimeout` por fuente no
+sobrevive a un reinicio, no se reparte entre procesos y hay que rehacerlo cada
+vez que alguien cambia un horario. Mirar quién toca cada minuto es más tonto y
+no tiene ninguno de esos problemas.
+
+**La reclamación la decide la base, no el proceso.** Un `UPDATE` condicional
+sobre `lastScheduledAt`, igual que el `SKIP LOCKED` del outbox: varios workers
+son correctos por diseño, los dos ven que a la fuente le toca, y leer-entonces-
+escribir haría que los dos publicaran. Gana quien cambia la fila.
+
+**Todo en UTC.** La misma expresión tiene que significar lo mismo en el
+portátil, en CI y en producción. La consecuencia hay que decirla: una PYME
+española que escriba `0 3 * * *` sincroniza a las 4:00 hora local en verano. Una
+zona horaria por tenant es el paso siguiente, no un descuido.
+
+El matcher es propio y no una librería porque solo hace falta "¿casa este
+minuto?", no calcular próximas ejecuciones — que es la parte difícil de cron y
+la única razón para traer una dependencia. Implementa la trampa del POSIX: con
+día-del-mes Y día-de-semana ambos restringidos, la regla es **O**, no Y.
+`0 0 1 * 1` es "el día 1 y además todos los lunes".
+
 ## Próximo paso
 
-**El planificador.** `syncSchedule` guarda un cron y no lo lee nadie: hoy la
-sincronización es manual. Sin planificador, "el conocimiento siempre al día" es
-un botón que alguien tiene que pulsar.
-
-Después, conectores con credenciales (Notion, Drive) — y ahí sí hace falta
+Conectores con credenciales (Notion, Drive) — y ahí sí hace falta
 `SECRETS_ENCRYPTION_KEY`, que está en `.env` y **no lo lee ningún código**. Los
 secretos se cifran en reposo y no se devuelven por API (§28), así que eso hay
 que construirlo antes del primer conector con token.
@@ -488,6 +510,17 @@ AI_PROVIDER=groq GROQ_API_KEY=... npm run eval
 cargado.** Windows bloquea `query_engine-windows.dll.node` y el renombrado del
 temporal falla. Pasa al medir en segundo plano y compilar a la vez: hay que
 esperar a que el proceso termine.
+
+**`rawPrisma` NO se salta RLS: `systemPrisma` sí.** Los dos se llaman "cliente
+crudo" en el código y hacen cosas distintas — `rawPrisma` se conecta con el rol
+de aplicación, así que las políticas siguen aplicando. Una consulta entre
+tenants con `rawPrisma` y sin contexto devuelve **cero filas en silencio**.
+Pasó de verdad al escribir el planificador: no encontraba una sola fuente, sin
+error ni traza. El síntoma es la ausencia de síntoma.
+
+Las dos excepciones sancionadas a "el cliente que se salta RLS no aparece en la
+ruta de una petición" son `findApiKeyByHash` y el planificador. Ninguna de las
+dos es una petición.
 
 **Las transacciones expiran por el event loop, no por su propio trabajo.** El
 proveedor de embeddings local corre ONNX en el hilo principal y lo bloquea

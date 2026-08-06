@@ -410,6 +410,14 @@ model KnowledgeSource {
 
   syncCursor     Json?
   syncSchedule   String? // cron; null = solo manual
+  // Último minuto en que el planificador la disparó.
+  //
+  // Es lo que hace idempotente al planificador: el worker sondea cada pocos
+  // segundos, así que un cron que casa "las 3:00" casaría treinta veces
+  // seguidas dentro de ese minuto. Y es DURABLE y no un Set en memoria porque
+  // varios workers son correctos por diseño: la reclamación la decide un UPDATE
+  // condicional en la base, no el proceso.
+  lastScheduledAt DateTime?
   lastSyncAt     DateTime?
   lastSyncStatus IngestStatus?
   lastSyncError  String?
