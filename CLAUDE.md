@@ -38,6 +38,28 @@ desde cero hasta los 370 tests en verde.
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
 
+### Dónde viven las claves, y por qué se atasca la gente aquí
+
+Son **dos sitios distintos para dos cosas distintas**, y confundirlos cuesta un
+rato:
+
+- **`platform/.env`** — lo único que leen los comandos locales (`npm run eval`,
+  `npm run dev`, `npm run worker`).
+- **Secreto de GitHub** (`Settings → Secrets → Actions`) — lo único que lee CI.
+  Es de **escritura únicamente**: ni la web lo vuelve a enseñar ni ningún
+  proceso local puede leerlo. Guardar la clave ahí NO la deja disponible en la
+  máquina.
+
+Así que para medir en local hay que poner la clave en el `.env`, aunque ya esté
+en GitHub. No es duplicar por descuido: son dos entornos que no se ven.
+
+**No pases claves por la línea de comandos en Windows.** `VAR=x comando` es
+sintaxis de bash y en `cmd.exe` da "no se reconoce como un comando interno o
+externo". En PowerShell hay que escribir `$env:VAR="x"; comando`, y con `set` en
+cmd la variable **se queda puesta** en esa terminal — que es la causa habitual
+de "medí Groq y me salió el número del modelo local". Con la clave en el `.env`,
+nada de esto importa.
+
 `npm run eval` corre la medición completa (recuperación **y** abstención) contra
 Postgres real y un generador real. Necesita el catálogo sembrado; si falta, lo
 dice y explica cómo. Sale con código 1 si la puerta bloquea, para servir en CI.
@@ -699,9 +721,14 @@ dice qué hacer.
 
 Para repetir la medición:
 
+Con `AI_PROVIDER` y `GROQ_API_KEY` puestos en `platform/.env`:
+
 ```bash
 npm run prompts:seed
-AI_PROVIDER=groq GROQ_API_KEY=... npm run eval
+```
+
+```bash
+npm run eval
 ```
 
 ## Decisiones abiertas
