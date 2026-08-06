@@ -72,10 +72,11 @@ generadores:
 utilidad: los pequeños se callan cosas que sí sabían.
 
 El conjunto tiene hoy 14 casos; los 4 conversacionales se añadieron después de
-esa tirada y las cifras de arriba son las de los 10 de un turno. Repetirla:
+esa tirada y las cifras de arriba son las de los 10 de un turno. Para repetirla,
+pon `AI_PROVIDER` y `GROQ_API_KEY` en `platform/.env` y ejecuta:
 
 ```bash
-AI_PROVIDER=groq GROQ_API_KEY=... npm run eval
+npm run eval
 ```
 
 Sale con código 1 si la puerta bloquea, y CI la ejecuta en cada push.

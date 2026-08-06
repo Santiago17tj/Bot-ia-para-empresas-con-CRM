@@ -395,11 +395,18 @@ un número antes de firmar.
 «porque un timeout corto convierte lento en roto y el arnés lo contaría como
 abstención». No lo es bastante para esta misma tabla: **120 s está por debajo
 del p50 del 7B (134 s)**, así que la medición muere con «The operation was
-aborted due to timeout» antes de llegar al informe. Se sube con `AI_TIMEOUT_MS`:
+aborted due to timeout» antes de llegar al informe. Se sube con `AI_TIMEOUT_MS`
+en el `.env`, junto al proveedor — no delante del comando, por lo de **Dónde
+viven las claves**:
 
 ```bash
-AI_PROVIDER=ollama AI_TIMEOUT_MS=900000 npm run eval
+AI_PROVIDER="ollama"
+AI_TIMEOUT_MS="900000"
 ```
+
+Y después `npm run eval` a secas. Acuérdate de devolver `AI_PROVIDER` a `groq`
+al terminar: un `.env` que se quedó en `ollama` es la otra forma de «medí Groq y
+me salió el número del modelo local».
 
 Contra Groq no aparece —p95 de 15 s— así que solo muerde en el camino
 on-premise, que es justo el que se prueba menos.
@@ -783,8 +790,9 @@ con servidor simulado no pueden cubrir, y son dos ratos cortos:
 **Volver a medir la puerta con Groq.** Los casos conversacionales ya están y los
 tests pasan, pero la cifra de la tabla de "Estado actual del arnés" es de ANTES
 de añadirlos: son cuatro casos más, y uno de ellos —`hilo-sin-reembolso`— es más
-duro que cualquiera de los de un turno. Hace falta una tirada con
-`AI_PROVIDER=groq GROQ_API_KEY=...` para actualizarla.
+duro que cualquiera de los de un turno. Hace falta una tirada de `npm run eval`
+con `AI_PROVIDER="groq"` y una `GROQ_API_KEY` con valor en `platform/.env` — ver
+**Dónde viven las claves**.
 
 Después `/v1/contacts`, que es lo último de §27, y con ello la superficie de la
 API queda completa.
