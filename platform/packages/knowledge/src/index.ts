@@ -1,6 +1,7 @@
 export {
   chunkDocument,
   splitByHeadings,
+  pageMarker,
   splitSentences,
   estimateTokens,
 } from "./chunking.js";
@@ -23,6 +24,10 @@ export {
   ConversionError,
   MIN_USEFUL_CHARS,
   htmlToMarkdown,
+  pdfConverter,
+  docxConverter,
+  mostFrequentHeight,
+  distinctHeadingHeights,
   textToMarkdown,
   csvToMarkdown,
   parseCsv,

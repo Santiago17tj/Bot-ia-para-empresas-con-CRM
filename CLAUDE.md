@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 199 tests
+npm test               # 213 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -52,11 +52,11 @@ el diálogo "Continue" funciona.
 
 ## Estado
 
-**Fase 0 completa. Fase 1 cerrada salvo los conversores PDF/DOCX.**
+**Fase 0 y Fase 1 completas.**
 
-El producto ya tiene puerta de entrada: se sube un documento por la API, un
-worker lo indexa y queda respondiendo preguntas. Verificado con los dos
-procesos vivos contra Groq.
+El producto ya tiene puerta de entrada completa: se sube un PDF o un DOCX por
+la API, un worker lo indexa y queda respondiendo preguntas con citas. Verificado
+de punta a punta.
 
 | Paquete | Qué es | Tests |
 |---|---|---|
@@ -66,15 +66,15 @@ procesos vivos contra Groq.
 | `events` | Outbox transaccional + despachador | 11 |
 | `observability` | Trazas, Prompt Registry, siembra, consumo | 11 |
 | `context` | Context Engine, presupuesto, recetas | 22 |
-| `knowledge` | Conversión, troceado, híbrida, grounding, **respuesta** | 45 + 20 int. |
+| `knowledge` | Conversión (**PDF/DOCX**), troceado, híbrida, grounding, respuesta | 58 + 20 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*` | 14 int. |
 | `apps/worker` | Despachador del outbox, ingesta asíncrona | 8 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
-**Estado actual del arnés**). La API sirve `/v1/knowledge/search` y `/answer`,
-verificada de punta a punta contra Groq. Faltan los conversores PDF/DOCX.
+**Estado actual del arnés**). La API sirve `/v1/knowledge/search`, `/answer` y
+`/documents`, y CI ejecuta todo en cada push.
 
 ## Invariantes que NO se pueden romper
 
@@ -315,12 +315,41 @@ base. Ver el apartado de migraciones.
 La secuencia entera está verificada contra una base vacía en un contenedor
 aparte, no solo escrita.
 
+## Los conversores binarios
+
+**Un PDF no tiene encabezados.** No es una limitación de la librería: el formato
+describe glifos en coordenadas, no estructura. Y el listón de un conversor aquí
+es conservar encabezados, porque el troceador corta por ellos y las citas se
+construyen con ellos.
+
+Así que se infieren del TAMAÑO de cada línea. El cuerpo del texto es la altura
+más frecuente ponderada **por caracteres, no por líneas** — un documento con
+veinte titulares cortos y tres párrafos largos tiene más líneas de titular, y la
+moda por líneas elegiría el titular como cuerpo, invirtiendo la jerarquía
+entera. Lo que sobresale un 15% se promueve a encabezado. Cuando no encuentra
+ninguno lo dice en los avisos, en vez de dejar creer que el documento venía bien
+estructurado.
+
+**DOCX pasa por HTML.** mammoth traduce los estilos de Word a `<h1>/<h2>/<ul>`
+semánticos y de ahí reutiliza `htmlToMarkdown`, que ya estaba probado. Leer el
+XML de OOXML a mano habría sido un segundo camino que mantener para llegar al
+mismo Markdown. Aquí no hay heurística: los encabezados son encabezados.
+
+**`pageNumber` ya se rellena.** Estaba declarado en el tipo desde el primer día
+y no lo ponía nadie. El conversor de PDF emite `<!--page:N-->` y `splitByHeadings`
+lo convierte en el número de página del fragmento — el dato con el que una
+persona comprueba una cita en un manual de 300 páginas. El marcador se elimina
+antes de embeber: dejarlo metería ruido en el vector.
+
 ## Próximo paso
 
-Conversores PDF/DOCX, los únicos que necesitan librería. El registro
-(`registerConverter`) ya está y la ruta de subida los rechaza hoy con un 415 que
-lo dice. Después, el resto de la superficie de §27 (`/v1/chat`, `/v1/sources`
-para conectores, `/v1/contacts`).
+El resto de la superficie de §27: `/v1/chat`, `/v1/sources` para conectores
+(Notion, URL, Drive) y `/v1/contacts`. `KnowledgeSource` ya está en el esquema
+con `syncSchedule` y `syncCursor`, así que el sitio donde encaja un conector ya
+existe.
+
+Pendiente menor: `xlsx`, `pptx` y el `.doc` antiguo se rechazan con un 415 que
+dice qué hacer.
 
 Para repetir la medición:
 

@@ -97,6 +97,31 @@ function multipart(
   };
 }
 
+/** Igual que `multipart`, pero para bytes binarios con su tipo real. */
+function binario(
+  contenido: Buffer,
+  filename: string,
+  contentType: string,
+): { payload: Buffer; headers: Record<string, string> } {
+  const boundary = "----test-boundary-0123456789";
+  // Explícito y no un salto de línea literal: multipart exige CRLF, y un
+  // fichero normalizado a LF por git rompería el formato sin que se viera.
+  const CRLF = String.fromCharCode(13, 10);
+
+  const cabecera = Buffer.from(
+    `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="file"; filename="${filename}"${CRLF}` +
+      `Content-Type: ${contentType}${CRLF}${CRLF}`,
+    "utf8",
+  );
+  const cierre = Buffer.from(`${CRLF}--${boundary}--${CRLF}`, "utf8");
+
+  return {
+    payload: Buffer.concat([cabecera, contenido, cierre]),
+    headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+  };
+}
+
 /** Avanza el worker hasta vaciar la cola. */
 async function procesarCola(): Promise<void> {
   await dispatcher.reclaimExpired();
@@ -252,12 +277,65 @@ describe(
     // Fallos
     // -----------------------------------------------------------------------
 
-    test("un PDF disfrazado de markdown se rechaza igual, por su extensión", async () => {
-      // El multipart declara `text/markdown` a propósito: es lo que hacen las
-      // librerías HTTP que no adivinan el tipo. Si mandara el MIME, el
-      // conversor de Markdown extraería los bytes binarios como texto y
-      // crearía un documento indexado lleno de basura sin fallar.
-      const subida = multipart("%PDF-1.4 falso", "informe.pdf");
+    test("un PDF de verdad se sube, se indexa y responde preguntas", async () => {
+      // El caso que hace vendible la ingesta: nadie sube markdown, sube el PDF
+      // que le dio su gestoría. Se genera uno real, con jerarquía tipográfica,
+      // y se comprueba el ciclo entero por la API.
+      const { PDFDocument, StandardFonts } = await import("pdf-lib");
+      const pdf = await PDFDocument.create();
+      const normal = await pdf.embedFont(StandardFonts.Helvetica);
+      const negrita = await pdf.embedFont(StandardFonts.HelveticaBold);
+      const pagina = pdf.addPage([600, 800]);
+      pagina.drawText("Politica de Garantias", { x: 50, y: 740, size: 24, font: negrita });
+      pagina.drawText("Cobertura", { x: 50, y: 700, size: 16, font: negrita });
+      pagina.drawText("La garantia legal cubre dos anos desde la fecha de compra.", {
+        x: 50, y: 675, size: 11, font: normal,
+      });
+
+      const subida = binario(
+        Buffer.from(await pdf.save()),
+        "garantias.pdf",
+        "application/pdf",
+      );
+
+      const respuesta = await app.inject({
+        method: "POST",
+        url: "/v1/knowledge/documents",
+        headers: { ...auth(claveAcme), ...subida.headers },
+        payload: subida.payload,
+      });
+      assert.equal(respuesta.statusCode, 202);
+
+      await procesarCola();
+
+      const { id } = respuesta.json<{ id: string }>();
+      const detalle = await app.inject({
+        method: "GET",
+        url: `/v1/knowledge/documents/${id}`,
+        headers: auth(claveAcme),
+      });
+      assert.equal(
+        detalle.json<{ status: string; error: string | null }>().status,
+        "READY",
+        `el PDF no se indexó: ${detalle.json<{ error: string | null }>().error ?? ""}`,
+      );
+
+      const busqueda = await app.inject({
+        method: "POST",
+        url: "/v1/knowledge/search",
+        headers: auth(claveAcme),
+        payload: { query: "cuanto dura la garantia" },
+      });
+
+      const { results } = busqueda.json<{ results: { content: string }[] }>();
+      assert.ok(
+        results.some((r) => r.content.includes("dos anos")),
+        "un PDF subido por la API tiene que acabar respondiendo por la API",
+      );
+    });
+
+    test("un formato todavía sin conversor se rechaza al subir, no en el worker", async () => {
+      const subida = multipart("contenido", "presentacion.pptx");
 
       const respuesta = await app.inject({
         method: "POST",
@@ -269,12 +347,12 @@ describe(
       assert.equal(
         respuesta.statusCode,
         415,
-        "aceptar un PDF, responder 202 y fallar después le da al cliente un " +
-          "FAILED por algo que se sabía al subirlo",
+        "aceptarlo, responder 202 y fallar después le da al cliente un FAILED " +
+          "por algo que se sabía al subirlo",
       );
       assert.match(
         respuesta.json<{ error: { message: string } }>().error.message,
-        /PDF/,
+        /PPTX/,
       );
     });
 

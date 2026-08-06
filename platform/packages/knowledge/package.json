@@ -13,8 +13,14 @@
   },
   "dependencies": {
     "@platform/db": "*",
+    "@platform/env": "*",
     "@platform/observability": "*",
     "@platform/providers": "*",
-    "@platform/env": "*"
+    "mammoth": "^1.12.0",
+    "pdfjs-dist": "^6.2.108"
+  },
+  "devDependencies": {
+    "docx": "^9.7.1",
+    "pdf-lib": "^1.17.1"
   }
 }

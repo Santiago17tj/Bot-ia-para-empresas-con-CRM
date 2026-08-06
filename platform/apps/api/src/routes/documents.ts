@@ -274,9 +274,8 @@ export async function registerDocumentRoutes(app: FastifyInstance): Promise<void
  * Un `.pdf` es un PDF diga lo que diga la cabecera.
  */
 const PENDIENTES: Record<string, string> = {
-  pdf: "PDF",
-  docx: "DOCX",
-  doc: "DOC",
+  // PDF y DOCX ya NO están aquí: tienen conversor propio.
+  doc: "DOC (Word 97-2003) — guárdalo como .docx",
   xlsx: "XLSX",
   xls: "XLS",
   pptx: "PPTX",

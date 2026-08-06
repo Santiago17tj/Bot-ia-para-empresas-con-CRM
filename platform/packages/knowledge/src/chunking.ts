@@ -51,9 +51,27 @@ export function estimateTokens(text: string): number {
  * "Manual de garantías › Devoluciones › Plazo" en vez de "fragmento 47", y lo
  * que da al modelo el contexto que el troceo le quitó.
  */
+export function pageMarker(page: number): string {
+  return `<!--page:${page}-->`;
+}
+
+const PAGE_MARKER = /^<!--page:(\d+)-->$/;
+
 export function splitByHeadings(markdown: string): ChunkInput[] {
   const lines = markdown.split(/\r?\n/);
   const sections: ChunkInput[] = [];
+
+  // Página en curso. Los conversores que saben de páginas —hoy el de PDF—
+  // insertan `<!--page:N-->` y aquí se convierte en el `pageNumber` del
+  // fragmento. Sin esto, `pageNumber` estaba declarado en el tipo desde el
+  // primer día y no lo rellenaba nadie: la cita de un manual de 300 páginas
+  // decía de qué sección venía pero no de qué página, que es justo el dato con
+  // el que una persona va a comprobarlo.
+  //
+  // El marcador es un comentario HTML porque atraviesa el Markdown sin
+  // renderizarse y no puede confundirse con contenido del documento.
+  let currentPage: number | undefined;
+  let sectionPage: number | undefined;
 
   // Indexado POR NIVEL, no por posición en la ruta. Usar la posición asume que
   // el documento empieza en `#`, y muchos empiezan en `##`: entonces un `##`
@@ -67,11 +85,29 @@ export function splitByHeadings(markdown: string): ChunkInput[] {
 
   const flush = (): void => {
     const text = buffer.join("\n").trim();
-    if (text.length > 0) sections.push({ text, breadcrumbs: currentPath() });
+    if (text.length > 0) {
+      sections.push({
+        text,
+        breadcrumbs: currentPath(),
+        // La página donde EMPIEZA la sección, no donde termina: una sección que
+        // cruza un salto de página se cita por donde el lector la va a buscar.
+        ...(sectionPage === undefined ? {} : { pageNumber: sectionPage }),
+      });
+    }
     buffer = [];
+    sectionPage = currentPage;
   };
 
   for (const line of lines) {
+    const page = PAGE_MARKER.exec(line.trim());
+    if (page !== null) {
+      currentPage = Number(page[1]);
+      // Si la sección aún no tiene contenido, empieza en esta página. Si ya lo
+      // tiene, el marcador solo actualiza dónde empezará la SIGUIENTE.
+      if (buffer.join("").trim() === "") sectionPage = currentPage;
+      continue;
+    }
+
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading === null) {
       buffer.push(line);
@@ -88,7 +124,17 @@ export function splitByHeadings(markdown: string): ChunkInput[] {
   }
   flush();
 
-  return sections.length > 0 ? sections : [{ text: markdown.trim(), breadcrumbs: [] }];
+  // El respaldo también limpia marcadores: un documento sin encabezados no
+  // debe acabar con `<!--page:3-->` incrustado en el texto que se embebe y que
+  // luego se le enseña al modelo.
+  return sections.length > 0
+    ? sections
+    : [
+        {
+          text: markdown.replace(/^<!--page:\d+-->$/gm, "").trim(),
+          breadcrumbs: [],
+        },
+      ];
 }
 
 /**

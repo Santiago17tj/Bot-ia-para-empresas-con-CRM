@@ -22,6 +22,7 @@
     "@platform/storage": "*"
   },
   "devDependencies": {
-    "@platform/api": "*"
+    "@platform/api": "*",
+    "pdf-lib": "^1.17.1"
   }
 }

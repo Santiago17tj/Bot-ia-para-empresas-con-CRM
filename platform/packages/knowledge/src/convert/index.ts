@@ -1,6 +1,8 @@
 import { extname } from "node:path";
 
+import { docxConverter } from "./docx.js";
 import { htmlConverter } from "./html.js";
+import { pdfConverter } from "./pdf.js";
 import { csvConverter, markdownConverter, textConverter } from "./text.js";
 import {
   ConversionError,
@@ -21,6 +23,8 @@ const CONVERTERS: DocumentConverter[] = [
   textConverter,
   htmlConverter,
   csvConverter,
+  pdfConverter,
+  docxConverter,
 ];
 
 export function registerConverter(converter: DocumentConverter): void {
@@ -97,3 +101,6 @@ export { ConversionError, assessExtraction, MIN_USEFUL_CHARS } from "./types.js"
 export type { ConversionResult, DocumentConverter } from "./types.js";
 export { htmlToMarkdown, decodeEntities, normalizeBlankLines } from "./html.js";
 export { textToMarkdown, csvToMarkdown, parseCsv } from "./text.js";
+
+export { pdfConverter, mostFrequentHeight, distinctHeadingHeights } from "./pdf.js";
+export { docxConverter } from "./docx.js";
