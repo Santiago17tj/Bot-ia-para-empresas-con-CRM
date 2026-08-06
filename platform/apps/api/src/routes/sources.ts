@@ -6,6 +6,7 @@ import {
   ConnectorError,
   availableConnectors,
   connectorFor,
+  isValidTimeZone,
   parseCron,
 } from "@platform/connectors";
 
@@ -43,6 +44,8 @@ const CREATE_BODY = {
     config: { type: "object" },
     // Cron. Null o ausente = solo manual.
     syncSchedule: { type: ["string", "null"], maxLength: 100 },
+    // Zona IANA. Null o ausente = la del tenant.
+    syncTimezone: { type: ["string", "null"], maxLength: 64 },
   },
 } as const;
 
@@ -53,6 +56,7 @@ const UPDATE_BODY = {
     name: { type: "string", minLength: 1, maxLength: 200 },
     config: { type: "object" },
     syncSchedule: { type: ["string", "null"], maxLength: 100 },
+    syncTimezone: { type: ["string", "null"], maxLength: 64 },
     isActive: { type: "boolean" },
   },
 } as const;
@@ -62,12 +66,14 @@ interface CreateBody {
   kind: "URL" | "SITEMAP" | "NOTION" | "GOOGLE_DRIVE";
   config: Record<string, unknown>;
   syncSchedule?: string | null;
+  syncTimezone?: string | null;
 }
 
 interface UpdateBody {
   name?: string;
   config?: Record<string, unknown>;
   syncSchedule?: string | null;
+  syncTimezone?: string | null;
   isActive?: boolean;
 }
 
@@ -84,6 +90,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
           kind: true,
           config: true,
           syncSchedule: true,
+          syncTimezone: true,
           lastSyncAt: true,
           lastSyncStatus: true,
           lastSyncError: true,
@@ -105,6 +112,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
         // esta capa no necesita saber de qué van.
         config: publicConfig(source.kind, source.config),
         syncSchedule: source.syncSchedule,
+        syncTimezone: source.syncTimezone,
         lastSyncAt: source.lastSyncAt,
         lastSyncStatus: source.lastSyncStatus,
         lastSyncError: source.lastSyncError,
@@ -122,12 +130,13 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
     async (request, reply) => {
       requireScope(request.apiKey, "knowledge:write");
 
-      const { name, kind, config, syncSchedule } = request.body;
+      const { name, kind, config, syncSchedule, syncTimezone } = request.body;
 
       // Se valida ANTES de guardar. Una fuente mal configurada que se acepta al
       // crearla falla la primera noche que sincroniza, cuando nadie mira.
       const validated = validateOrFail(kind, config);
       assertValidSchedule(syncSchedule);
+      assertValidTimezone(syncTimezone);
       const stored = encryptOrFail(kind, validated, {}, request.tenantCtx.tenantId);
 
       const source = await readInTenant(request.tenantCtx, (tx) =>
@@ -138,6 +147,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
             kind,
             config: stored as Prisma.InputJsonValue,
             syncSchedule: syncSchedule ?? null,
+            syncTimezone: syncTimezone ?? null,
           },
           select: { id: true, name: true, kind: true, config: true, createdAt: true },
         }),
@@ -157,8 +167,9 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
       requireScope(request.apiKey, "knowledge:write");
 
       const existing = await findOrFail(request.tenantCtx, request.params.id);
-      const { name, config, syncSchedule, isActive } = request.body;
+      const { name, config, syncSchedule, syncTimezone, isActive } = request.body;
       assertValidSchedule(syncSchedule);
+      assertValidTimezone(syncTimezone);
 
       const updated = await readInTenant(request.tenantCtx, (tx) =>
         tx.knowledgeSource.update({
@@ -176,6 +187,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
                   ) as Prisma.InputJsonValue,
                 }),
             ...(syncSchedule === undefined ? {} : { syncSchedule }),
+            ...(syncTimezone === undefined ? {} : { syncTimezone }),
             ...(isActive === undefined ? {} : { isActive }),
           },
           select: {
@@ -184,6 +196,7 @@ export async function registerSourceRoutes(app: FastifyInstance): Promise<void> 
             kind: true,
             config: true,
             syncSchedule: true,
+            syncTimezone: true,
             isActive: true,
           },
         }),
@@ -318,6 +331,26 @@ function encryptOrFail(
  * Aceptarlo produce una fuente que no sincroniza nunca, y el síntoma —"mi web
  * no se actualiza"— aparece días después sin nada que lo explique.
  */
+/**
+ * Una zona que el sistema no conoce se rechaza al escribir.
+ *
+ * Igual que el cron, y por el mismo motivo: `Europe/Madird` aceptado en
+ * silencio no produce ningún error, produce una fuente que se sincroniza a una
+ * hora que su dueño no pidió. Un fallo que no se ve es peor que uno que sí.
+ */
+function assertValidTimezone(timezone: string | null | undefined): void {
+  if (timezone === undefined || timezone === null || timezone.trim() === "") return;
+
+  if (!isValidTimeZone(timezone)) {
+    throw new ApiError(
+      400,
+      "invalid_timezone",
+      `"${timezone}" no es una zona horaria conocida. Se espera un nombre IANA ` +
+        "como Europe/Madrid o America/Bogota.",
+    );
+  }
+}
+
 function assertValidSchedule(schedule: string | null | undefined): void {
   if (schedule === undefined || schedule === null || schedule.trim() === "") return;
 

@@ -11,13 +11,16 @@
  * cálculo de la próxima ejecución es la parte difícil de cron; la coincidencia
  * es una comparación de cinco campos.
  *
- * **Todo se interpreta en UTC.** No en la hora del servidor: la misma expresión
- * tiene que significar lo mismo en el portátil de desarrollo, en CI y en
- * producción, y la hora local del servidor depende de dónde se despliegue. La
- * consecuencia hay que decirla en voz alta: una PYME española que escriba
- * `0 3 * * *` esperando las tres de la madrugada tendrá su sincronización a las
- * 4:00 en verano y a las 3:00 en invierno. Una zona horaria por tenant es el
- * paso siguiente, no un descuido.
+ * **Se interpreta en la zona del TENANT, nunca en la del servidor.** Son cosas
+ * distintas y la diferencia importa: la zona del servidor depende de dónde se
+ * despliegue, así que la misma expresión significaría una cosa en el portátil y
+ * otra en producción. La del tenant es un dato del negocio, viaja con él y no
+ * cambia al mover el despliegue. Por defecto `UTC`, que es lo que había antes y
+ * sigue siendo la respuesta correcta cuando nadie ha dicho otra cosa.
+ *
+ * Antes se interpretaba todo en UTC sin más, y la consecuencia era que una PYME
+ * española que escribía `0 3 * * *` esperando las tres de la madrugada tenía su
+ * sincronización a las 4:00 en verano.
  */
 
 export class CronError extends Error {
@@ -164,18 +167,95 @@ function parseField(raw: string, name: keyof typeof RANGES): CronField {
  * Es contraintuitivo y está en el POSIX. Implementarlo como Y hace que una
  * expresión perfectamente válida no se dispare casi nunca.
  */
-export function cronMatches(expression: CronExpression, date: Date): boolean {
-  if (!expression.minute.values.has(date.getUTCMinutes())) return false;
-  if (!expression.hour.values.has(date.getUTCHours())) return false;
-  if (!expression.month.values.has(date.getUTCMonth() + 1)) return false;
+export function cronMatches(
+  expression: CronExpression,
+  date: Date,
+  timeZone: string = "UTC",
+): boolean {
+  const wall = wallClockIn(date, timeZone);
 
-  const dayOfMonth = expression.dayOfMonth.values.has(date.getUTCDate());
-  const dayOfWeek = expression.dayOfWeek.values.has(date.getUTCDay());
+  if (!expression.minute.values.has(wall.minute)) return false;
+  if (!expression.hour.values.has(wall.hour)) return false;
+  if (!expression.month.values.has(wall.month)) return false;
+
+  const dayOfMonth = expression.dayOfMonth.values.has(wall.dayOfMonth);
+  const dayOfWeek = expression.dayOfWeek.values.has(wall.dayOfWeek);
 
   const bothRestricted =
     !expression.dayOfMonth.unrestricted && !expression.dayOfWeek.unrestricted;
 
   return bothRestricted ? dayOfMonth || dayOfWeek : dayOfMonth && dayOfWeek;
+}
+
+export interface WallClock {
+  minute: number;
+  hour: number;
+  /** 1–12, como en cron. `Date` los da 0–11. */
+  month: number;
+  dayOfMonth: number;
+  /** 0 = domingo, como `getUTCDay()`. */
+  dayOfWeek: number;
+}
+
+/**
+ * La hora de pared de un instante en una zona.
+ *
+ * Con `Intl` y no con una librería de zonas horarias por el mismo motivo que el
+ * matcher es propio: lo único que hace falta es descomponer un instante en
+ * campos, y eso lo hace la plataforma con los datos de zonas del sistema — que
+ * además se actualizan con Node en vez de con un `npm update` que alguien tiene
+ * que acordarse de hacer cuando un país cambia su horario de verano.
+ *
+ * `en-CA` da ISO (`2026-08-06`), que es el único formato que se puede trocear
+ * sin ambigüedad. Con `en-US` habría que adivinar si `06/08` es junio o agosto.
+ */
+export function wallClockIn(date: Date, timeZone: string): WallClock {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+  }).formatToParts(date);
+
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+
+  // `hour12: false` produce 24 a medianoche en algunos entornos, no 0. Sin este
+  // módulo, un `0 0 * * *` no se dispararía nunca en esos entornos y el síntoma
+  // sería "el cron de medianoche no va", que es de los peores de diagnosticar.
+  const hour = Number(get("hour")) % 24;
+
+  const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const dayOfWeek = WEEKDAYS.indexOf(get("weekday"));
+
+  return {
+    minute: Number(get("minute")),
+    hour,
+    month: Number(get("month")),
+    dayOfMonth: Number(get("day")),
+    dayOfWeek: dayOfWeek === -1 ? date.getUTCDay() : dayOfWeek,
+  };
+}
+
+/**
+ * ¿Es un nombre de zona que el sistema conoce?
+ *
+ * Se valida al ESCRIBIR, igual que el cron. Una zona mal escrita —`Europe/Madird`—
+ * aceptada en silencio deja una fuente que se sincroniza a una hora que no es la
+ * que su dueño pidió, y eso no produce ningún error: produce un horario
+ * equivocado, que es mucho peor porque nadie lo mira.
+ */
+export function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Valida sin quedarse la expresión. Para el formulario de creación. */

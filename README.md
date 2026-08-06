@@ -91,7 +91,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector, en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 387 tests
+npm test                       # 398 tests
 ```
 
 **`setup`, no `db:migrate`.** `prisma migrate dev` interpreta como deriva las
@@ -100,7 +100,7 @@ resetear la base; decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` más el SQL crudo, que es lo correcto y lo que usa CI.
 
 Esta secuencia está verificada contra un checkout limpio y un Postgres vacío, no
-solo escrita: desde cero hasta los 387 tests en verde.
+solo escrita: desde cero hasta los 398 tests en verde.
 
 Para levantarlo:
 
@@ -191,7 +191,7 @@ platform/           El monorepo
 | `eval` | Arnés de evaluación con abstención y puerta |
 | `storage` | Costura de ficheros y driver local |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción |
-| `connectors` | Web, Notion, Drive, defensa SSRF, planificador cron |
+| `connectors` | Web, Notion, Drive, defensa SSRF, cron con zona horaria por tenant |
 | `apps/api` · `apps/worker` | Fastify · outbox, ingesta, sincronización |
 
 ## Decisiones que conviene conocer antes de tocar nada
@@ -232,9 +232,6 @@ Se dice porque un README que solo enumera lo que funciona es publicidad:
 - **Notion y Drive están verificados contra servidores simulados**, no contra
   cuentas reales. Eso verifica nuestro código, no el comportamiento de Notion ni
   el de Google.
-- **La sincronización programada se interpreta en UTC.** Una PYME española que
-  escriba `0 3 * * *` sincroniza a las 4:00 locales en verano. Falta zona
-  horaria por tenant.
 - **No hay CRM.** `/v1/contacts` guarda identidad y datos de contacto, que es lo
   que pide §27 para esta fase. `Company`, oportunidades y sincronización con un
   CRM externo son Fase 4 y no están empezadas.

@@ -25,7 +25,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 387 tests
+npm test                       # 398 tests
 ```
 
 **`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
@@ -34,7 +34,7 @@ resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
 Esta secuencia está **verificada contra un checkout limpio y un Postgres
-vacío**, no solo escrita: desde cero hasta los 387 tests en verde.
+vacío**, no solo escrita: desde cero hasta los 398 tests en verde.
 
 Ese «checkout limpio» hay que decirlo aparte, porque durante doce ejecuciones de
 CI la secuencia estuvo rota y en local no se notaba. `apply-sql.ts` importa
@@ -132,9 +132,9 @@ el chat da continuidad entre turnos.
 | `eval` | Arnés con abstención, **conversación**, modo `full` | 12 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
-| `connectors` | Web, Notion, **Drive**, SSRF, cron | 101 |
-| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat`, **`/v1/contacts`** | 37 int. |
-| `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
+| `connectors` | Web, Notion, **Drive**, SSRF, cron con **zona horaria** | 107 |
+| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat`, **`/v1/contacts`** | 38 int. |
+| `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 30 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
 **Estado actual del arnés**). CI lo ejecuta en cada push — desde que se arregló,
@@ -487,7 +487,7 @@ integración se bloquean entre ellos y fallan por algo que no es el código.
 `.github/workflows/ci.yml`, dos jobs:
 
 - **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
-  ICU que `docker-compose.yml`. Ejecuta los 387 tests, integración incluida:
+  ICU que `docker-compose.yml`. Ejecuta los 398 tests, integración incluida:
   con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
 - **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
   secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
@@ -636,10 +636,35 @@ sobre `lastScheduledAt`, igual que el `SKIP LOCKED` del outbox: varios workers
 son correctos por diseño, los dos ven que a la fuente le toca, y leer-entonces-
 escribir haría que los dos publicaran. Gana quien cambia la fila.
 
-**Todo en UTC.** La misma expresión tiene que significar lo mismo en el
-portátil, en CI y en producción. La consecuencia hay que decirla: una PYME
-española que escriba `0 3 * * *` sincroniza a las 4:00 hora local en verano. Una
-zona horaria por tenant es el paso siguiente, no un descuido.
+**En la zona del TENANT, nunca en la del servidor.** `Tenant.timezone` (nombre
+IANA, por defecto `UTC`) es lo que interpreta el cron, y `KnowledgeSource.syncTimezone`
+lo anula por fuente. La zona del servidor no vale: depende de dónde se
+despliegue, así que la misma expresión significaría una cosa en el portátil y
+otra en producción. La del tenant es un dato del negocio, viaja con él.
+
+Antes se interpretaba todo en UTC y una PYME española que escribía `0 3 * * *`
+sincronizaba a las 5:00 locales en verano. La conversión usa `Intl` y no una
+librería de zonas: los datos de zonas vienen con Node y se actualizan con él, en
+vez de con un `npm update` que alguien tiene que recordar cuando un país cambia
+su horario de verano.
+
+**Los dos bordes del horario de verano están medidos, y se aceptan a
+propósito.** Hay test de cada uno:
+
+| Borde | Qué pasa | Por qué se acepta |
+|---|---|---|
+| Primavera (29-03-2026, Madrid) | `30 2 * * *` **no se dispara**: las 02:30 no existen ese día | La web se indexa un día después |
+| Otoño (25-10-2026) | Se dispara **dos veces**: las 02:30 ocurren a las 00:30 y a las 01:30 UTC | El cursor guarda el hash por URL, así que la segunda pasada no vuelve a pagar troceado ni embeddings |
+
+Aceptable **aquí**, que es una sincronización de contenido idempotente. En un
+cron de facturación o de envío de correos no lo sería, y quien añada el segundo
+caso de uso de cron tiene que releer esta tabla antes de reutilizar el matcher.
+
+**Una zona desconocida degrada a UTC con aviso, no tumba el planificador.**
+Dejar de sincronizar a todos los clientes porque uno escribió `Europe/Madird`
+sería peor que sincronizar a ese uno como se hacía antes. Al escribir sí se
+rechaza con 400: aceptarla no da ningún error, da un horario equivocado que
+nadie mira.
 
 El matcher es propio y no una librería porque solo hace falta "¿casa este
 minuto?", no calcular próximas ejecuciones — que es la parte difícil de cron y
@@ -881,10 +906,6 @@ con `AI_PROVIDER="groq"` y una `GROQ_API_KEY` con valor en `platform/.env` — v
 
 `/v1/contacts` **ya está**, y con ello la superficie de la API de §27 queda
 completa. Ver **Contactos**.
-
-Deuda conocida: la sincronización programada se interpreta en **UTC**, así que
-una PYME española que ponga `0 3 * * *` sincroniza a las 4:00 locales en verano.
-Zona horaria por tenant.
 
 Pendiente menor: `xlsx`, `pptx` y el `.doc` antiguo se rechazan con un 415 que
 dice qué hacer.

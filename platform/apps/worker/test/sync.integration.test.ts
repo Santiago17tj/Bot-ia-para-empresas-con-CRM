@@ -149,6 +149,30 @@ describe(
       );
     });
 
+    test("una zona horaria inexistente se rechaza al crear la fuente", async () => {
+      // El error real que comete la gente. Aceptarlo no produce ningún fallo:
+      // produce una fuente que sincroniza a una hora que su dueño no pidió, y
+      // eso no lo mira nadie.
+      const respuesta = await app.inject({
+        method: "POST",
+        url: "/v1/sources",
+        headers: auth,
+        payload: {
+          name: "Zona mal escrita",
+          kind: "URL",
+          config: { startUrls: [sitio] },
+          syncSchedule: "0 3 * * *",
+          syncTimezone: "Europe/Madird",
+        },
+      });
+
+      assert.equal(respuesta.statusCode, 400);
+      assert.equal(
+        respuesta.json<{ error: { code: string } }>().error.code,
+        "invalid_timezone",
+      );
+    });
+
     test("se crea la fuente con su configuración normalizada", async () => {
       const respuesta = await app.inject({
         method: "POST",

@@ -34,6 +34,8 @@ export type { FetchResult } from "./net.js";
 export {
   parseCron,
   cronMatches,
+  isValidTimeZone,
+  wallClockIn,
   isValidCron,
   minuteOf,
   CronError,

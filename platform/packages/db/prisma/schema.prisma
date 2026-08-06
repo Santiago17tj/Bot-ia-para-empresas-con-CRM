@@ -39,6 +39,16 @@ model Tenant {
   slug      String     @unique // el único unique global legítimo del esquema
   name      String
   plan      TenantPlan @default(TRIAL)
+
+  /// Zona horaria del negocio, en nombre IANA (`Europe/Madrid`).
+  ///
+  /// Es lo que interpreta los crones de sincronización. Va aquí y no en una
+  /// variable de entorno del servidor porque es un dato del NEGOCIO: viaja con
+  /// el cliente y no cambia al mover el despliegue de región. Por defecto
+  /// `UTC`, que es lo que había antes de existir este campo y sigue siendo la
+  /// respuesta correcta cuando nadie ha dicho otra cosa.
+  timezone String @default("UTC")
+
   isActive  Boolean    @default(true)
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -565,6 +575,13 @@ model KnowledgeSource {
 
   syncCursor     Json?
   syncSchedule   String? // cron; null = solo manual
+  /// Anula la zona del tenant para ESTA fuente. `null` = la del tenant.
+  ///
+  /// Existe por dos motivos y ninguno es teórico: hoy es la única forma de
+  /// tocar la zona por API —no hay ruta de administración de tenants— y un
+  /// cliente con delegación en otro país quiere sincronizar la web de cada una
+  /// a su madrugada, no a la de la sede.
+  syncTimezone   String?
   // Último minuto en que el planificador la disparó.
   //
   // Es lo que hace idempotente al planificador: el worker sondea cada pocos

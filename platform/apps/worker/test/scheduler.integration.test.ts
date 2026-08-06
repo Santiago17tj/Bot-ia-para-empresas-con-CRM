@@ -67,6 +67,80 @@ describe(
       await systemPrisma.$disconnect();
     });
 
+    test("el cron se interpreta en la zona del TENANT, no en UTC", async () => {
+      // La deuda que esto cierra: una PYME española que escribe `0 3 * * *`
+      // quiere las tres de SU madrugada. Con el tenant en Europe/Madrid y en
+      // verano (UTC+2), eso son las 01:00 UTC.
+      await systemPrisma.tenant.update({
+        where: { id: TENANT },
+        data: { timezone: "Europe/Madrid" },
+      });
+
+      const id = await crearFuente(TENANT, "0 3 * * *");
+
+      const aLasTresUtc = await runDueSyncs(new Date(Date.UTC(2026, 6, 15, 3, 0)));
+      assert.equal(
+        await eventosDe(id),
+        0,
+        "las 03:00 UTC son las 5 de la madrugada en Madrid: todavía no toca",
+      );
+      assert.equal(aLasTresUtc.triggered, 0);
+
+      await runDueSyncs(new Date(Date.UTC(2026, 6, 15, 1, 0)));
+      assert.equal(await eventosDe(id), 1, "las 01:00 UTC son las 3 en Madrid");
+
+      await systemPrisma.tenant.update({
+        where: { id: TENANT },
+        data: { timezone: "UTC" },
+      });
+    });
+
+    test("syncTimezone de la fuente manda sobre la del tenant", async () => {
+      // El caso real: un cliente español con delegación en Colombia quiere
+      // sincronizar la web de cada una a su propia madrugada.
+      await systemPrisma.tenant.update({
+        where: { id: TENANT },
+        data: { timezone: "Europe/Madrid" },
+      });
+
+      const bogota = await crearFuente(TENANT, "0 3 * * *", {
+        syncTimezone: "America/Bogota",
+      });
+
+      // 08:00 UTC son las 3 en Bogotá (UTC-5) y las 10 en Madrid.
+      await runDueSyncs(new Date(Date.UTC(2026, 6, 15, 8, 0)));
+      assert.equal(await eventosDe(bogota), 1);
+
+      await systemPrisma.tenant.update({
+        where: { id: TENANT },
+        data: { timezone: "UTC" },
+      });
+    });
+
+    test("una zona desconocida degrada a UTC en vez de tumbar el planificador", async () => {
+      // Dejar de sincronizar a TODOS los clientes porque uno tiene mal escrita
+      // su zona sería peor que sincronizar a ese uno como se hacía antes.
+      // Con un minuto propio, no el de TRES: dejar una fuente reclamada en el
+      // mismo minuto que usa otro test los acopla por el estado de la base, y
+      // el que falla es el de después.
+      const rota = await crearFuente(TENANT, "0 6 * * *", {
+        syncTimezone: "Europe/Madird",
+      });
+
+      const avisos: string[] = [];
+      const resultado = await runDueSyncs(
+        new Date(Date.UTC(2026, 7, 6, 6, 0)),
+        (m) => avisos.push(m),
+      );
+
+      assert.equal(await eventosDe(rota), 1, "se dispara, interpretado en UTC");
+      assert.ok(
+        avisos.some((a) => a.includes("zona horaria desconocida")),
+        "y lo dice en vez de callárselo",
+      );
+      assert.equal(resultado.invalid.length, 0, "no es un cron inválido");
+    });
+
     test("dispara la fuente a la que le toca y solo esa", async () => {
       const aLasTres = await crearFuente(TENANT, "0 3 * * *");
       const aLasCuatro = await crearFuente(TENANT, "0 4 * * *");

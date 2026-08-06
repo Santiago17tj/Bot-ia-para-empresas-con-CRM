@@ -1,4 +1,9 @@
-import { cronMatches, minuteOf, parseCron } from "@platform/connectors";
+import {
+  cronMatches,
+  isValidTimeZone,
+  minuteOf,
+  parseCron,
+} from "@platform/connectors";
 import { runWithTenant, systemPrisma, withRlsTransaction } from "@platform/db";
 import { publish } from "@platform/events";
 
@@ -20,8 +25,10 @@ interface ScheduledSource {
   id: string;
   tenantId: string;
   syncSchedule: string;
+  syncTimezone: string | null;
   lastScheduledAt: Date | null;
   lastSyncStatus: string | null;
+  tenant: { timezone: string };
 }
 
 export interface SchedulerResult {
@@ -65,8 +72,10 @@ export async function runDueSyncs(
           id: true,
           tenantId: true,
           syncSchedule: true,
+          syncTimezone: true,
           lastScheduledAt: true,
           lastSyncStatus: true,
+          tenant: { select: { timezone: true } },
         },
       }))();
 
@@ -75,9 +84,24 @@ export async function runDueSyncs(
   for (const raw of candidates) {
     const source = raw as ScheduledSource;
 
+    // La fuente manda sobre el tenant, y el tenant sobre UTC. Una zona que el
+    // sistema no conoce se degrada a UTC con aviso en vez de tumbar el
+    // planificador: dejar de sincronizar a TODOS los clientes porque uno tiene
+    // mal escrita su zona es peor que sincronizar a ese uno a la hora que se
+    // usaba antes.
+    const declared = source.syncTimezone ?? source.tenant.timezone;
+    let timeZone = declared;
+    if (!isValidTimeZone(declared)) {
+      timeZone = "UTC";
+      log(
+        `[worker] fuente ${source.id}: zona horaria desconocida "${declared}", ` +
+          "se interpreta en UTC",
+      );
+    }
+
     let matches: boolean;
     try {
-      matches = cronMatches(parseCron(source.syncSchedule), minute);
+      matches = cronMatches(parseCron(source.syncSchedule), minute, timeZone);
     } catch (error) {
       // Un cron inválido no tumba el planificador: se anota y se sigue con las
       // demás fuentes. La API valida al crear, así que llegar aquí significa

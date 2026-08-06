@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CronError, cronMatches, isValidCron, minuteOf, parseCron } from "../dist/index.js";
+import {
+  CronError,
+  cronMatches,
+  isValidCron,
+  isValidTimeZone,
+  minuteOf,
+  parseCron,
+} from "../dist/index.js";
 
 /**
  * Cron, y sobre todo la parte que se hace mal.
@@ -147,11 +154,106 @@ test("minuteOf recorta segundos y milisegundos", () => {
   );
 });
 
-test("se interpreta en UTC, no en la hora del servidor", () => {
+test("sin zona se interpreta en UTC, no en la hora del servidor", () => {
   // La misma expresión tiene que significar lo mismo en el portátil, en CI y en
-  // producción. La consecuencia está documentada: una PYME española que escriba
-  // `0 3 * * *` sincroniza a las 4:00 hora local en verano.
+  // producción, y la hora del servidor depende de dónde se despliegue.
   const cron = parseCron("0 3 * * *");
   assert.equal(cronMatches(cron, new Date(Date.UTC(2026, 7, 6, 3, 0))), true);
   assert.equal(cronMatches(cron, new Date(Date.UTC(2026, 7, 6, 1, 0))), false);
+});
+
+// ---------------------------------------------------------------------------
+// Zona horaria del tenant
+// ---------------------------------------------------------------------------
+
+test("`0 3 * * *` en Madrid son las 3 de la madrugada TODO el año", () => {
+  // Este es el test que cierra la deuda. Antes, esa expresión se disparaba a
+  // las 03:00 UTC — o sea a las 5:00 locales en verano y a las 4:00 en
+  // invierno. Ahora se dispara cuando en Madrid son las tres, que es lo que
+  // quiso decir quien la escribió.
+  const cron = parseCron("0 3 * * *");
+
+  // Verano: Madrid va en UTC+2, así que las 3 locales son las 01:00 UTC.
+  assert.equal(cronMatches(cron, utc("2026-07-15T01:00"), "Europe/Madrid"), true);
+  assert.equal(cronMatches(cron, utc("2026-07-15T03:00"), "Europe/Madrid"), false);
+
+  // Invierno: UTC+1, las 3 locales son las 02:00 UTC.
+  assert.equal(cronMatches(cron, utc("2026-01-15T02:00"), "Europe/Madrid"), true);
+  assert.equal(cronMatches(cron, utc("2026-01-15T01:00"), "Europe/Madrid"), false);
+});
+
+test("la zona también mueve el día, no solo la hora", () => {
+  // A las 23:30 UTC del lunes, en Madrid ya es martes. Un cron de los martes
+  // tiene que casar, y uno de los lunes no — mirar solo la hora dejaría este
+  // caso mal y solo se notaría una noche a la semana.
+  const martes = parseCron("30 1 * * 2");
+  const lunes = parseCron("30 1 * * 1");
+
+  // 2026-07-13 es lunes. 23:30 UTC = 01:30 del martes en Madrid.
+  assert.equal(cronMatches(martes, utc("2026-07-13T23:30"), "Europe/Madrid"), true);
+  assert.equal(cronMatches(lunes, utc("2026-07-13T23:30"), "Europe/Madrid"), false);
+});
+
+test("medianoche local casa: la hora 24 no se cuela por 0", () => {
+  // `hour12: false` devuelve "24" a medianoche en algunos entornos en vez de
+  // "00". Sin normalizar, `0 0 * * *` no se dispararía NUNCA ahí, y el síntoma
+  // —"el cron de medianoche no va"— no apunta a nada.
+  const cron = parseCron("0 0 * * *");
+  // 22:00 UTC en verano = medianoche en Madrid.
+  assert.equal(cronMatches(cron, utc("2026-07-15T22:00"), "Europe/Madrid"), true);
+});
+
+test("una zona al otro lado del meridiano también funciona", () => {
+  // Bogotá es UTC-5 todo el año: sin horario de verano, que es el caso de la
+  // mitad del mercado hispanohablante.
+  const cron = parseCron("0 3 * * *");
+  assert.equal(cronMatches(cron, utc("2026-07-15T08:00"), "America/Bogota"), true);
+});
+
+test("una zona desconocida se detecta, no se traga", () => {
+  assert.equal(isValidTimeZone("Europe/Madrid"), true);
+  assert.equal(isValidTimeZone("UTC"), true);
+  // El error real que comete la gente. Aceptarlo no da ningún error: da un
+  // horario equivocado, que es peor porque nadie lo mira.
+  assert.equal(isValidTimeZone("Europe/Madird"), false);
+});
+
+// ---------------------------------------------------------------------------
+// Los dos bordes del horario de verano
+// ---------------------------------------------------------------------------
+
+test("en el salto de primavera, la hora que no existe no se dispara", () => {
+  // El 29 de marzo de 2026, Madrid pasa de las 02:00 a las 03:00. Las 02:30
+  // locales NO EXISTEN ese día, así que un `30 2 * * *` se salta esa noche.
+  //
+  // Es aceptable AQUÍ y conviene decir por qué: esto sincroniza contenido, y
+  // saltarse una noche significa que la web del cliente se indexa un día
+  // después. En un cron de facturación no sería aceptable, y quien añada el
+  // segundo caso de uso de cron tiene que releer esto.
+  const cron = parseCron("30 2 * * *");
+  const minutos = Array.from({ length: 240 }, (_, i) =>
+    new Date(Date.UTC(2026, 2, 29, 0, 0) + i * 60_000),
+  );
+
+  const disparos = minutos.filter((m) => cronMatches(cron, m, "Europe/Madrid"));
+  assert.equal(disparos.length, 0, "las 02:30 no existen ese día");
+});
+
+test("en el salto de otoño, la hora repetida casa dos veces", () => {
+  // El 25 de octubre de 2026, Madrid repite la hora de 02:00 a 03:00, así que
+  // las 02:30 locales ocurren DOS veces: a las 00:30 y a las 01:30 UTC.
+  //
+  // También es aceptable aquí, y por un motivo concreto del sistema: el cursor
+  // del conector guarda el hash por URL, así que la segunda pasada no vuelve a
+  // pagar troceado ni embeddings de lo que no cambió. Repetir sale casi gratis.
+  // En un cron que cobrara o enviara correos, no.
+  const cron = parseCron("30 2 * * *");
+  const minutos = Array.from({ length: 240 }, (_, i) =>
+    new Date(Date.UTC(2026, 9, 25, 0, 0) + i * 60_000),
+  );
+
+  const disparos = minutos.filter((m) => cronMatches(cron, m, "Europe/Madrid"));
+  assert.equal(disparos.length, 2);
+  assert.equal(disparos[0]?.toISOString(), "2026-10-25T00:30:00.000Z");
+  assert.equal(disparos[1]?.toISOString(), "2026-10-25T01:30:00.000Z");
 });
