@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 341 tests
+npm test               # 357 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -70,7 +70,7 @@ de punta a punta.
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
-| `connectors` | Web, **Notion**, SSRF, cron | 85 |
+| `connectors` | Web, Notion, **Drive**, SSRF, cron | 101 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources` | 14 int. |
 | `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
 
@@ -546,13 +546,49 @@ toca.
 hijos en peticiones aparte. Conviene decirlo claro: eso verifica nuestro código,
 no el comportamiento de Notion. Falta una pasada contra un espacio real.
 
+## Google Drive
+
+**Cuenta de servicio, no OAuth de usuario**, por lo mismo que en Notion se
+eligió el token interno. Y el modelo mental le sale gratis al cliente: la cuenta
+de servicio tiene un correo, y **se comparte la carpeta con ese correo** como se
+comparte con un compañero. Es la misma operación que compartir una página con
+una integración de Notion, y no hay que explicarle qué es un `scope`.
+
+El JWT se firma a mano con `node:crypto` — treinta líneas contra una dependencia
+con su propia superficie. Ámbito de **solo lectura**: un conector de conocimiento
+no tiene por qué poder escribir.
+
+**Lo interesante es lo que NO hubo que escribir.** Drive entrega PDF y DOCX tal
+cual, y esos conversores ya existen y están probados. El conector descarga bytes
+y los entrega, igual que una subida manual. Solo lo nativo de Google necesita
+trato propio: un Documento no es un fichero, es un objeto en su servidor, y hay
+que pedirle que lo EXPORTE.
+
+Los Documentos se exportan a **markdown y no a texto plano**, porque conserva
+los encabezados — el listón de siempre. Las Hojas a CSV, que ya tiene conversor
+y es donde una PYME pone sus tarifas.
+
+Drive **no busca en profundidad**: hay que recorrer el árbol de subcarpetas a
+mano. Y los ids de carpeta se interpolan en su lenguaje de consulta, así que se
+validan con lista blanca antes de tocarlo.
+
+Como en Notion, lo incremental usa `modifiedTime` y se salta el fichero ANTES de
+descargarlo. Aquí pesa más: un PDF de veinte megas se bajaría entero para nada.
+
+**Verificado contra un servidor simulado**, con clave RSA generada en el propio
+test. Verifica nuestro código, no el comportamiento de Google.
+
 ## Próximo paso
 
-Probar Notion contra un espacio de verdad: crear una integración interna,
-compartirle un par de páginas y sincronizar. Es lo único que los tests con
-servidor simulado no pueden cubrir.
+Probar Notion y Drive **contra cuentas de verdad**. Es lo único que los tests
+con servidor simulado no pueden cubrir, y son dos ratos cortos:
 
-Después Google Drive, y luego `/v1/chat` y `/v1/contacts`.
+- Notion: integración interna en notion.so/my-integrations, compartirle un par
+  de páginas, crear la fuente con el token.
+- Drive: cuenta de servicio en Google Cloud, habilitar la API de Drive,
+  compartir una carpeta con su correo, pegar el JSON.
+
+Después `/v1/chat` y `/v1/contacts`, que es lo que queda de §27.
 
 Deuda conocida: la sincronización programada se interpreta en **UTC**, así que
 una PYME española que ponga `0 3 * * *` sincroniza a las 4:00 locales en verano.

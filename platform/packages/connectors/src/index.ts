@@ -1,3 +1,4 @@
+import { driveConnector } from "./drive.js";
 import { notionConnector } from "./notion.js";
 import { webConnector } from "./web.js";
 import { ConnectorError, type SourceConnector } from "./types.js";
@@ -7,6 +8,17 @@ export type { WebSourceConfig } from "./web.js";
 
 export { notionConnector, titleOf } from "./notion.js";
 export type { NotionSourceConfig } from "./notion.js";
+
+export { driveConnector, planFor } from "./drive.js";
+export type { DriveSourceConfig } from "./drive.js";
+
+export {
+  parseServiceAccount,
+  buildAssertion,
+  GoogleTokenSource,
+  DRIVE_SCOPE,
+} from "./google-auth.js";
+export type { ServiceAccount } from "./google-auth.js";
 
 export { blocksToMarkdown, richTextToMarkdown } from "./notion-blocks.js";
 export type { NotionBlock, NotionRichText } from "./notion-blocks.js";
@@ -48,6 +60,7 @@ const CONNECTORS: Record<string, SourceConnector> = {
   URL: webConnector,
   SITEMAP: webConnector,
   NOTION: notionConnector,
+  GOOGLE_DRIVE: driveConnector,
 };
 
 export function connectorFor(kind: string): SourceConnector {
