@@ -65,13 +65,16 @@ interface AnswerBody {
   categories?: string[];
 }
 
-export async function registerKnowledgeRoutes(app: FastifyInstance): Promise<void> {
+export async function registerKnowledgeRoutes(
+  app: FastifyInstance,
+  injected: { ai?: AIProvider; embedding?: EmbeddingProvider } = {},
+): Promise<void> {
   // Perezosos y compartidos: construir el proveedor de embeddings carga un
   // modelo de 120 MB, y hacerlo por petición sería insostenible. Construirlo al
   // arrancar impediría levantar la API para servir solo búsqueda cuando el
   // generador no está configurado.
-  let embedder: EmbeddingProvider | undefined;
-  let generator: AIProvider | undefined;
+  let embedder = injected.embedding;
+  let generator = injected.ai;
 
   const getEmbedder = (): EmbeddingProvider => (embedder ??= createEmbeddingProvider());
   const getGenerator = (): AIProvider => (generator ??= createAIProvider());

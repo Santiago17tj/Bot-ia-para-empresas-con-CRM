@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 
 import { runWithTenant, withRlsTransaction, type TenantContext } from "@platform/db";
+import type { AIProvider, EmbeddingProvider } from "@platform/providers";
 
 import {
   authenticate,
@@ -12,6 +13,7 @@ import {
 } from "./auth.js";
 import { ApiError, toErrorResponse } from "./errors.js";
 import { RateLimiter } from "./rate-limit.js";
+import { registerChatRoutes } from "./routes/chat.js";
 import { registerDocumentRoutes } from "./routes/documents.js";
 import { registerGapRoutes } from "./routes/gaps.js";
 import { registerHealthRoutes } from "./routes/health.js";
@@ -29,6 +31,17 @@ declare module "fastify" {
 
 export interface ServerOptions {
   logger?: boolean;
+  /**
+   * Proveedores inyectados. **Para tests.**
+   *
+   * Sin esto, probar el chat exige llamar a un modelo de verdad, y lo que hay
+   * que comprobar —que el hilo da continuidad, que la pregunta reescrita es la
+   * que se busca— no depende de qué modelo sea. Es la misma costura que
+   * `ingestDocument` tiene para la transacción.
+   *
+   * En producción se omite y cada ruta resuelve el suyo por configuración.
+   */
+  providers?: { ai?: AIProvider; embedding?: EmbeddingProvider };
 }
 
 export function buildServer(options: ServerOptions = {}): FastifyInstance {
@@ -126,10 +139,13 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
       request.tenantCtx = contextFor(key, String(request.id));
     });
 
-    await scope.register(registerKnowledgeRoutes);
+    const injected = options.providers ?? {};
+
+    await scope.register(registerKnowledgeRoutes, injected);
     await scope.register(registerDocumentRoutes);
     await scope.register(registerGapRoutes);
     await scope.register(registerSourceRoutes);
+    await scope.register(registerChatRoutes, injected);
   });
 
   return app;

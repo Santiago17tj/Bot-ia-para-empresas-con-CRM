@@ -25,7 +25,7 @@ npm install
 npm run db:up          # Postgres 17 + pgvector en el puerto 5433
 npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 357 tests
+npm test               # 370 tests
 ```
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
@@ -66,12 +66,12 @@ de punta a punta.
 | `events` | Outbox transaccional + despachador | 11 |
 | `observability` | Trazas, Prompt Registry, siembra, consumo | 11 |
 | `context` | Context Engine, presupuesto, recetas | 22 |
-| `knowledge` | Conversión (PDF/DOCX), troceado, híbrida, grounding, respuesta, **huecos** | 58 + 28 int. |
+| `knowledge` | Conversión, troceado, híbrida, grounding, respuesta, huecos, **conversación** | 58 + 28 int. |
 | `eval` | Arnés con abstención, modo `full` | 6 int. |
 | `storage` | Costura de ficheros + driver local | 15 |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
 | `connectors` | Web, Notion, **Drive**, SSRF, cron | 101 |
-| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources` | 14 int. |
+| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat` | 27 int. |
 | `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
@@ -578,6 +578,48 @@ descargarlo. Aquí pesa más: un PDF de veinte megas se bajaría entero para nad
 **Verificado contra un servidor simulado**, con clave RSA generada en el propio
 test. Verifica nuestro código, no el comportamiento de Google.
 
+## El chat
+
+**Es interfaz, no núcleo** — la regla del proyecto. La ruta no decide nada sobre
+la calidad de la respuesta: ensambla `resolveQuestion` y `answerFromKnowledge`,
+que es lo que mide el arnés. Lo que añade es continuidad y archivo.
+
+**Lo único del chat que SÍ es núcleo: una pregunta de seguimiento no se puede
+buscar.** Lo que se busca en la documentación es el TEXTO de la pregunta, y
+«¿y a Canarias?» no se parece a ninguna frase de ningún manual. Sin reescribir,
+el sistema se abstiene de algo que sí sabe — y justo después de haber contestado
+bien a la anterior, que es la peor abstención posible de cara al cliente.
+
+Por eso `resolveQuestion` vive en `@platform/knowledge` y no en la ruta: es una
+decisión que cambia lo que se recupera, y una decisión tomada en la ruta es una
+decisión sin medir sirviéndose en producción.
+
+Tres cosas que hace bien y no son obvias:
+
+- **Sin historia no llama al modelo.** El primer mensaje no puede ser un
+  seguimiento; gastar una llamada ahí es pagar por una decisión ya tomada.
+- **Si la pregunta ya se entiende sola, la deja intacta.** Reescribir una
+  pregunta que estaba bien solo puede empeorarla.
+- **Falla hacia delante.** Si la reescritura no sale, se busca la original:
+  recupera peor, pero abortar sería cambiar un resultado mediocre por ninguno.
+
+La pregunta reescrita se archiva junto a la original. Depurar por qué una
+respuesta salió rara en el tercer turno sin saber qué se buscó de verdad es
+adivinar.
+
+Una conversación `ESCALATED` calla al bot: seguir contestando encima de una
+persona que ya está atendiendo es peor que no responder. Y el hilo se localiza
+por canal + id externo, así que un reintento de entrega de WhatsApp no abre una
+conversación nueva.
+
+**Toda abstención del chat también alimenta los huecos**, y se registra la
+pregunta RESUELTA: «¿y a Canarias?» en un informe no le dice nada a nadie.
+
+**Limitación honesta:** el arnés mide un solo turno. La reescritura está probada
+—incluido el caso de la misma pregunta con y sin hilo— pero no medida contra una
+puerta de calidad. Extender el conjunto con casos conversacionales es lo que
+convertiría esto en medido.
+
 ## Próximo paso
 
 Probar Notion y Drive **contra cuentas de verdad**. Es lo único que los tests
@@ -588,7 +630,11 @@ con servidor simulado no pueden cubrir, y son dos ratos cortos:
 - Drive: cuenta de servicio en Google Cloud, habilitar la API de Drive,
   compartir una carpeta con su correo, pegar el JSON.
 
-Después `/v1/chat` y `/v1/contacts`, que es lo que queda de §27.
+**Casos conversacionales en el arnés.** Hoy mide un turno; la reescritura de
+seguimientos es la única decisión de calidad del chat y no pasa por la puerta.
+
+Después `/v1/contacts`, que es lo último de §27, y con ello la superficie de la
+API queda completa.
 
 Deuda conocida: la sincronización programada se interpreta en **UTC**, así que
 una PYME española que ponga `0 3 * * *` sincroniza a las 4:00 locales en verano.

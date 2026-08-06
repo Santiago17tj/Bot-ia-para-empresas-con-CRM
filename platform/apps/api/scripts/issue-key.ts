@@ -15,7 +15,13 @@ import { generateApiKey } from "@platform/api";
  * Requiere `npm run build` antes.
  */
 
-const DEFAULT_SCOPES = ["knowledge:read", "knowledge:answer"];
+const DEFAULT_SCOPES = [
+  "knowledge:read",
+  "knowledge:answer",
+  "knowledge:write",
+  "chat:read",
+  "chat:write",
+];
 
 async function main(): Promise<void> {
   const [tenantId, name = "clave de desarrollo", ...scopes] = process.argv.slice(2);

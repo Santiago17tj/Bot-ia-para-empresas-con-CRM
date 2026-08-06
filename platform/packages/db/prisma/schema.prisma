@@ -58,6 +58,7 @@ model Tenant {
   promptDeploys    PromptDeployment[]
   evalSuites       EvalSuite[]
   knowledgeGaps    KnowledgeGap[]
+  conversations    Conversation[]
 
   @@map("tenant")
 }
@@ -289,6 +290,103 @@ model PromptDeployment {
 
   @@index([promptId, tenantId, isActive])
   @@map("promptDeployment")
+}
+
+// ===========================================================================
+// CONVERSACIONES (§10)
+// ===========================================================================
+
+enum ConversationChannel {
+  API
+  WEB
+  WHATSAPP
+  EMAIL
+  SLACK
+}
+
+enum ConversationStatus {
+  OPEN
+  // Escalada a una persona. El bot deja de responder: seguir contestando
+  // encima de un humano que ya está atendiendo es peor que no responder.
+  ESCALATED
+  CLOSED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+/**
+ * Un hilo de conversación.
+ *
+ * El chat es UNA interfaz del motor, no el motor. Esta tabla existe para dar
+ * continuidad —una pregunta de seguimiento necesita las anteriores— y para que
+ * las respuestas queden archivadas, no para que el chat condicione nada de lo
+ * que hay debajo.
+ */
+model Conversation {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  channel ConversationChannel @default(API)
+  // Id del hilo EN EL CANAL: el número de WhatsApp, el thread de Slack.
+  // Permite que el mismo hilo externo no cree dos conversaciones cuando el
+  // canal reintenta la entrega de un mensaje.
+  externalId String?
+  // Quién pregunta, según el canal. Cuando exista `Contact` (§10) se enlazará
+  // aquí; hasta entonces es el identificador que traiga el canal.
+  externalUserId String?
+
+  status       ConversationStatus @default(OPEN)
+  messageCount Int                @default(0)
+  lastMessageAt DateTime          @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+
+  @@unique([tenantId, channel, externalId])
+  @@index([tenantId, status, lastMessageAt])
+  @@map("conversation")
+}
+
+/**
+ * Un mensaje del hilo.
+ *
+ * Los mensajes del asistente guardan lo que hace auditable la respuesta: si
+ * afirmó o se abstuvo, con qué citas, si la validación tumbó al modelo, qué
+ * modelo fue y cuánto costó. Sin eso, "el bot dijo algo raro el martes" no se
+ * puede investigar.
+ */
+model Message {
+  id             String       @id @default(cuid())
+  tenantId       String
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  role    MessageRole
+  content String
+
+  // Solo para ASSISTANT.
+  answered  Boolean?
+  citations Json?
+  // El modelo intentó inventar y la validación lo tumbó. Se distingue de una
+  // abstención limpia porque significan cosas opuestas.
+  degraded  Boolean?
+  model     String?
+  latencyMs Int?
+  cost      Float?
+  // La pregunta reescrita para poder buscarla, si hubo que reescribirla.
+  resolvedQuestion String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, conversationId, createdAt])
+  @@map("message")
 }
 
 // ===========================================================================

@@ -111,6 +111,8 @@ DECLARE
     'documentVersion',
     'chunk',
     'knowledgeGap',
+    'conversation',
+    'message',
     'aiTrace',
     'auditLog',
     'usageRecord',

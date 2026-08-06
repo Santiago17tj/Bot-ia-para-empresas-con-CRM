@@ -67,6 +67,13 @@ export type {
   GapResult,
 } from "./gaps.js";
 
+export { resolveQuestion, RESOLVE_HISTORY_TURNS } from "./conversation.js";
+export type {
+  ConversationTurn,
+  ResolveOptions,
+  ResolvedQuestion,
+} from "./conversation.js";
+
 export { createGapMatcher } from "./gap-matcher.js";
 export type { GapMatcherOptions } from "./gap-matcher.js";
 export type { AnswerOptions, AnswerResult } from "./answer.js";
