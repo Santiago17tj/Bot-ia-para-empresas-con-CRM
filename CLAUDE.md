@@ -22,11 +22,19 @@ Regla de núcleo, que el usuario quiere como filtro de toda decisión:
 ```bash
 cd platform
 npm install
-npm run db:up          # Postgres 17 + pgvector en el puerto 5433
-npm run db:migrate     # migraciones + SQL crudo (vector, tsvector, RLS)
-npm run prompts:seed   # carga el catálogo de prompts en el registro
-npm test               # 370 tests
+npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
+npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
+npm run prompts:seed           # carga el catálogo de prompts en el registro
+npm test                       # 370 tests
 ```
+
+**`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
+columnas que añade el SQL crudo —vectores, tsvector, políticas RLS— y ofrece
+resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
+`migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
+
+Esta secuencia está **verificada contra un Postgres vacío**, no solo escrita:
+desde cero hasta los 370 tests en verde.
 
 `.env` ya existe en `platform/` (ignorado por git). `.env.example` lo documenta.
 
@@ -43,25 +51,50 @@ lánzalo:
 powershell -c "Start-Process 'C:\Users\Isabel\AppData\Local\Programs\DockerDesktop\Docker Desktop.exe'"
 ```
 
-Tarda 1–2 minutos. Historial: la instalación se interrumpió a medias y dejó
-sockets huérfanos indelebles en `AppData\Local\Docker\run` y
-`docker-secrets-engine`; se arreglaron **renombrando los directorios padre** (no
-se pueden borrar ni tras reiniciar). Si vuelve a fallar con "An unexpected error
-occurred", ese es el patrón. El grupo `docker-users` no existe pero es opcional:
+Tarda entre 1 y 4 minutos. El grupo `docker-users` no existe pero es opcional:
 el diálogo "Continue" funciona.
+
+**Los sockets huérfanos vuelven.** No fue un incidente aislado de la instalación
+inicial: reaparecen cada pocos días. El error es siempre de la misma forma —
+"An unexpected error occurred ... remove <ruta>.sock: The file cannot be accessed
+by the system"— y cambia solo qué socket lo provoca. Vistos hasta ahora:
+
+- `AppData\Local\Docker\run\dockerInference`
+- `AppData\Local\Docker\run\dockerDesktopLinuxEngine`
+- `AppData\Local\docker-secrets-engine\engine.sock`
+
+El remedio es el mismo y funciona: parar todos los procesos `*docker*` y
+**RENOMBRAR el directorio padre** del socket que nombre el error. Borrarlo no se
+puede, ni siquiera tras reiniciar; renombrarlo sí, y Docker crea uno nuevo
+limpio al arrancar. En `AppData\Local\Docker` se acumulan los renombrados de
+veces anteriores, y se pueden ignorar.
+
+```powershell
+Get-Process | Where-Object { $_.Name -like '*docker*' } | Stop-Process -Force
+Rename-Item 'C:\Users\Isabel\AppData\Local\Docker\run' 'run-roto-1'
+```
+
+Un detalle útil: el error puede saltar **con Docker ya funcionando**. Si el
+socket que falla es de un servicio secundario —el motor de secretos, por
+ejemplo— los contenedores arrancan y responden igual; comprueba con `docker ps`
+antes de perseguir el diálogo.
 
 ## Estado
 
 **Fase 0 y Fase 1 completas.**
 
-El producto ya tiene puerta de entrada completa: se sube un PDF o un DOCX por
-la API, un worker lo indexa y queda respondiendo preguntas con citas. Verificado
-de punta a punta.
+**Fase 2 en marcha:** conectores, huecos de conocimiento y chat ya están.
+
+El ciclo completo funciona de punta a punta y está verificado: se sube un PDF o
+un DOCX por la API —o se conecta una web, Notion o Drive, que se sincronizan
+solos por cron—, un worker lo indexa, y queda respondiendo preguntas con citas
+validadas en código. Cada abstención se registra como hueco de conocimiento, y
+el chat da continuidad entre turnos.
 
 | Paquete | Qué es | Tests |
 |---|---|---|
 | `env` | Carga del único `.env` de la raíz | — |
-| `db` | 22 modelos, aislamiento 3 capas, RLS | 11 + 9 int. |
+| `db` | 27 modelos, aislamiento 3 capas, RLS | 11 + 9 int. |
 | `providers` | `AIProvider` + `EmbeddingProvider`, 2 adaptadores | 23 |
 | `events` | Outbox transaccional + despachador | 11 |
 | `observability` | Trazas, Prompt Registry, siembra, consumo | 11 |
@@ -75,8 +108,7 @@ de punta a punta.
 | `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 26 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
-**Estado actual del arnés**). La API sirve `/v1/knowledge/search`, `/answer` y
-`/documents`, y CI ejecuta todo en cada push.
+**Estado actual del arnés**), y CI lo ejecuta todo en cada push.
 
 ## Invariantes que NO se pueden romper
 
@@ -86,8 +118,15 @@ compuestas · extensión de Prisma que falla cerrado sin contexto · políticas 
 tabla en una lista y no en otra es el conjunto con una sola defensa.
 
 - La aplicación usa `prisma` (filtrado) dentro de `runWithTenant`.
-- `systemPrisma` se salta RLS y existe **solo** para crear tenants, migrar y
-  limpiar en tests. Nunca en la ruta de una petición.
+- `systemPrisma` **se salta RLS**: crear tenants, migrar y limpiar en tests.
+  Nunca en la ruta de una petición.
+
+Hay **dos excepciones sancionadas**, y ninguna de las dos es una petición:
+`findApiKeyByHash` en `@platform/db` —que averigua a qué tenant pertenece una
+credencial, que es justo lo que aún no se sabe— y el planificador, que por
+definición mira todos los tenants para saber a quién le toca sincronizar. Las
+dos están encapsuladas con nombre propio para poder auditarlas leyendo quién las
+llama. Ver **Tres trampas de este entorno**.
 
 **`publish()` exige el cliente de transacción del llamante.** Es la garantía
 entera del outbox: si abriera su propia conexión, podría confirmarse mientras el
@@ -299,11 +338,26 @@ un número antes de firmar.
 ## La API
 
 ```bash
-npm run dev                                    # arranca en el PORT del .env
-npm run issue-key -w @platform/api -- <tenantId> "nombre" knowledge:read knowledge:answer
+npm run dev      # API, en el PORT del .env
+npm run worker   # worker, en OTRA terminal
+npm run issue-key -w @platform/api -- <tenantId> "nombre"
 ```
 
-`POST /v1/knowledge/search` · `POST /v1/knowledge/answer` · `GET /v1/health`.
+Sin ámbitos, la clave sale con los cinco por defecto: `knowledge:read`,
+`knowledge:answer`, `knowledge:write`, `chat:read` y `chat:write`.
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /v1/health` | Sin autenticar. Consulta la base: un health que solo dice que el proceso vive miente cuando Postgres está caído |
+| `POST /v1/knowledge/search` | Búsqueda híbrida |
+| `POST /v1/knowledge/answer` | Respuesta fundada con citas validadas |
+| `POST /v1/knowledge/documents` | Subida de fichero → **202** |
+| `GET /v1/knowledge/documents[/:id]` | Estado de la ingesta |
+| `GET /v1/knowledge/gaps` · `PATCH /v1/knowledge/gaps/:id` | Qué le preguntan y no sabe responder |
+| `GET`/`POST /v1/sources` · `PATCH /v1/sources/:id` | Orígenes que se sincronizan solos |
+| `POST /v1/sources/:id/sync` | Sincronizar ya → **202** |
+| `POST /v1/chat` | Conversación con continuidad |
+| `GET /v1/conversations/:id` · `POST .../status` | Hilo y escalada |
 
 La clave se imprime UNA vez: la base solo guarda el hash SHA-256 y los cuatro
 últimos caracteres. SHA-256 y no bcrypt a propósito — son 256 bits aleatorios,
@@ -663,7 +717,7 @@ AI_PROVIDER=groq GROQ_API_KEY=... npm run eval
 - **`.gitattributes`.** Git avisa de conversión LF→CRLF; sin él, un equipo mixto
   verá ficheros enteros como modificados sin tocarlos.
 
-## Dos trampas de este entorno
+## Tres trampas de este entorno
 
 **`prisma generate` falla con EPERM si hay un proceso vivo con el cliente
 cargado.** Windows bloquea `query_engine-windows.dll.node` y el renombrado del
