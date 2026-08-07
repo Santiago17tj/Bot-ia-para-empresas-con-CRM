@@ -91,7 +91,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector, en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 398 tests
+npm test                       # 408 tests
 ```
 
 **`setup`, no `db:migrate`.** `prisma migrate dev` interpreta como deriva las
@@ -100,18 +100,37 @@ resetear la base; decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` más el SQL crudo, que es lo correcto y lo que usa CI.
 
 Esta secuencia está verificada contra un checkout limpio y un Postgres vacío, no
-solo escrita: desde cero hasta los 398 tests en verde.
+solo escrita: desde cero hasta los 408 tests en verde.
 
 Para levantarlo:
 
 ```bash
 npm run dev      # API, en el PORT del .env
 npm run worker   # worker, en OTRA terminal
+npm run panel    # panel, en http://localhost:3002
 ```
 
 El worker es un proceso aparte a propósito: el proveedor de embeddings local
 corre ONNX en CPU y **bloquea el event loop**. Dentro de la API, ingerir un
 manual dejaría al servidor sin responder a nadie.
+
+## El panel
+
+Tres pantallas —subir documentos, preguntar con citas, ver los huecos— en
+`http://localhost:3002`. Se entra pegando una clave de API del tenant.
+
+**El panel no toca la base de datos.** No depende de `@platform/db`, así que no
+puede: todo pasa por `/v1/*`. Es la regla de §27 convertida en algo que no se
+puede incumplir por descuido, y hay un test que lo comprueba.
+
+**La clave no llega al navegador.** El panel la cifra con AES-256-GCM y la deja
+en una cookie `httpOnly` y `SameSite=Strict`; el JavaScript de la página no
+puede leerla y llama a un proxy del propio panel, que es quien pone la
+credencial.
+
+No es multiusuario: se entra con la clave del tenant, no con usuario y
+contraseña. `User` y `Membership` existen en el esquema y todavía no los
+autentica nadie.
 
 ## La API
 
@@ -235,9 +254,10 @@ Se dice porque un README que solo enumera lo que funciona es publicidad:
 - **No hay CRM.** `/v1/contacts` guarda identidad y datos de contacto, que es lo
   que pide §27 para esta fase. `Company`, oportunidades y sincronización con un
   CRM externo son Fase 4 y no están empezadas.
-- **No hay panel ni canales.** A la API se llega con una clave emitida por línea
-  de comandos. `WHATSAPP` es hoy un valor del enum de canal de una conversación,
-  no una integración con Meta.
+- **No hay canales.** `WHATSAPP` es hoy un valor del enum de canal de una
+  conversación, no una integración con Meta.
+- **El panel no tiene login de usuario.** Se entra con la clave de API del
+  tenant; no hay contraseñas ni sesiones por persona.
 - `xlsx`, `pptx` y el `.doc` antiguo se rechazan con un 415 que dice qué hacer.
 - Sin generador configurado, los huecos **no se agrupan**: cada abstención abre
   su fila. Peor informe, pero no es un dato perdido — y es mejor que agrupar con

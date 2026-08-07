@@ -25,7 +25,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 398 tests
+npm test                       # 408 tests
 ```
 
 **`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
@@ -34,7 +34,7 @@ resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
 Esta secuencia está **verificada contra un checkout limpio y un Postgres
-vacío**, no solo escrita: desde cero hasta los 398 tests en verde.
+vacío**, no solo escrita: desde cero hasta los 408 tests en verde.
 
 Ese «checkout limpio» hay que decirlo aparte, porque durante doce ejecuciones de
 CI la secuencia estuvo rota y en local no se notaba. `apply-sql.ts` importa
@@ -133,8 +133,9 @@ el chat da continuidad entre turnos.
 | `storage` | Costura de ficheros + driver local | 15 |
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
 | `connectors` | Web, Notion, **Drive**, SSRF, cron con **zona horaria** | 107 |
-| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat`, **`/v1/contacts`** | 38 int. |
+| `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat`, `/v1/contacts` | 39 int. |
 | `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 30 int. |
+| `apps/panel` | **Panel de operación**: proxy con sesión cifrada, 3 pantallas | 9 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
 **Estado actual del arnés**). CI lo ejecuta en cada push — desde que se arregló,
@@ -487,7 +488,7 @@ integración se bloquean entre ellos y fallan por algo que no es el código.
 `.github/workflows/ci.yml`, dos jobs:
 
 - **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
-  ICU que `docker-compose.yml`. Ejecuta los 398 tests, integración incluida:
+  ICU que `docker-compose.yml`. Ejecuta los 408 tests, integración incluida:
   con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
 - **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
   secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
@@ -817,6 +818,43 @@ errores reenvolvía cualquier error con `statusCode` 4xx —incluidos los
 para que un cliente pueda ramificar sin leer el texto en español; uno que
 siempre vale lo mismo no es cosmético, es el campo entero sin servir para nada.
 Arreglado comprobando `instanceof ApiError` antes de normalizar.
+
+## El panel
+
+`apps/panel`, en `npm run panel` (puerto 3002). Tres pantallas: subir un
+documento y verlo pasar a `READY`, preguntar y ver la respuesta con sus citas, y
+la lista de huecos ordenada por veces.
+
+**No depende de `@platform/db`, y eso es la garantía de §27.** «Todo lo que hace
+el panel se hace por API» deja de ser disciplina y pasa a ser algo que no se
+puede incumplir: el paquete no declara la dependencia, así que no puede importar
+la base aunque alguien quiera el atajo. Hay test que lo comprueba leyendo el
+`package.json`. Si una pantalla necesita un dato que la API no da, el arreglo es
+añadirlo a la API.
+
+**La clave de API no llega nunca al navegador.** Se pega una vez, el panel la
+valida contra la API de verdad —aceptar una inválida deja al usuario dentro de
+un panel que falla en cada pantalla— y la guarda cifrada con `@platform/secrets`
+en una cookie `httpOnly`, `SameSite=Strict` y de sesión. El JS del panel llama a
+`/api/*`, que reenvía poniendo la credencial del lado del servidor. Cifrada y no
+firmada: firmar evita la falsificación pero deja la clave legible para quien
+mire sus cookies. Y como GCM es autenticado, una cookie manipulada **falla al
+descifrar** en vez de devolver basura que después se mandaría como credencial.
+
+**El cuerpo se reenvía crudo.** `removeAllContentTypeParsers()` antes del
+comodín, porque el parser de JSON de Fastify tiene prioridad sobre `*` y sin
+quitarlo el proxy reenviaba `[object Object]`. Crudo es además lo que permite
+pasar un `multipart` de subida sin desmontarlo y volverlo a montar, que es donde
+se pierden los límites de sección y el fichero llega corrupto sin aviso.
+
+Sin framework de front ni empaquetador: tres pantallas sin estado no lo
+justifican, y meterlo añadiría un segundo sistema de build al monorepo.
+
+**Lo que el panel NO es: multiusuario.** Se entra con la clave de API del
+tenant, no con usuario y contraseña. `User` y `Membership` están en el esquema y
+no los autentica nadie todavía; un login de verdad —hash de contraseña, sesiones,
+recuperación— es una superficie de seguridad aparte y hacerla a medias es peor
+que no tenerla.
 
 ## El chat
 

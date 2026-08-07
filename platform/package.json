@@ -27,7 +27,8 @@
     "test": "npm run build && node --env-file-if-exists=.env --test --test-concurrency=1 \"packages/*/test/**/*.test.ts\" \"apps/*/test/**/*.test.ts\"",
     "test:unit": "npm run build && node --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/**/*.test.ts\" --test-skip-pattern=\"integration\"",
     "dev": "npm run dev -w @platform/api",
-    "worker": "npm run build && npm run start -w @platform/worker"
+    "worker": "npm run build && npm run start -w @platform/worker",
+    "panel": "npm run build && npm run start -w @platform/panel"
   },
   "devDependencies": {
     "@types/node": "^24.7.0",
