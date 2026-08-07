@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 
-import { withRlsTransaction, type Prisma } from "@platform/db";
+import { withRlsTransaction, type Prisma, type TenantContext } from "@platform/db";
 import { publish } from "@platform/events";
 import {
   answerFromKnowledge,
@@ -101,11 +101,11 @@ export async function registerKnowledgeRoutes(
         );
       });
 
-      await meter(request.tenantCtx.tenantId, [
+      await meter(request.tenantCtx, [
         { metric: "API_CALLS", quantity: 1 },
         { metric: "SEARCHES", quantity: 1 },
         { metric: "EMBEDDINGS", quantity: 1 },
-      ]);
+      ], undefined, (e) => request.log.error({ err: e }, "no se pudo medir el consumo"));
 
       return reply.send({ results: hits.map(publicHit) });
     },
@@ -140,13 +140,14 @@ export async function registerKnowledgeRoutes(
       // gratis.
       if (!passesThreshold(hits, policy.groundingThreshold)) {
         await meter(
-          tenantId,
+          request.tenantCtx,
           [
             { metric: "API_CALLS", quantity: 1 },
             { metric: "ANSWERS", quantity: 1 },
             { metric: "EMBEDDINGS", quantity: 1 },
           ],
           { question, reason: "BELOW_THRESHOLD" },
+          (e) => request.log.error({ err: e }, "no se pudo medir el consumo"),
         );
 
         return reply.send({
@@ -172,7 +173,7 @@ export async function registerKnowledgeRoutes(
       );
 
       await meter(
-        tenantId,
+        request.tenantCtx,
         [
           { metric: "API_CALLS", quantity: 1 },
           { metric: "ANSWERS", quantity: 1 },
@@ -184,6 +185,7 @@ export async function registerKnowledgeRoutes(
         // documentación cercana que no cubre el caso, y que la validación
         // tumbara la respuesta dice además que el modelo intentó rellenarlo.
         gapFor(result, question),
+        (e) => request.log.error({ err: e }, "no se pudo medir el consumo"),
       );
 
       return reply.send({
@@ -254,28 +256,43 @@ async function loadPolicy(
  * respuesta que el cliente ya tiene calculada.
  */
 async function meter(
-  tenantId: string,
+  ctx: TenantContext,
   entries: Parameters<typeof recordUsage>[2],
   gap?: { question: string; reason: GapReason },
+  log?: (error: unknown) => void,
 ): Promise<void> {
   try {
-    await withRlsTransaction(async (tx) => {
-      await recordUsage(tx, tenantId, entries);
+    // `withTenant` y no `withRlsTransaction` a secas. Esto faltaba, y el
+    // resultado era que NADA de esto ocurría nunca: `withRlsTransaction` exige
+    // contexto de tenant y falla cerrado sin él, así que cada llamada aquí
+    // lanzaba `TenantContextError` y el `catch` de abajo se lo tragaba. Ni una
+    // línea de consumo, ni un solo hueco de conocimiento registrado desde la
+    // API — la mitad que convierte la abstención en producto, sin funcionar y
+    // sin un error que lo dijera.
+    await withTenant(ctx, () =>
+      withRlsTransaction(async (tx) => {
+        await recordUsage(tx, ctx.tenantId, entries);
 
       // El hueco se publica en la MISMA transacción que la medición. Lo pesado
       // —embeber la pregunta y buscarle grupo— lo hace el worker: no lo paga
       // quien está esperando la respuesta, y menos en una abstención, que ya
       // es de por sí la petición más lenta.
-      if (gap !== undefined) {
-        await publish(tx, {
-          type: "knowledge.gap",
-          tenantId,
-          payload: { question: gap.question, reason: gap.reason },
-        });
-      }
-    });
-  } catch {
-    // Deliberadamente silencioso aquí; el fallo se ve en la traza.
+        if (gap !== undefined) {
+          await publish(tx, {
+            type: "knowledge.gap",
+            tenantId: ctx.tenantId,
+            payload: { question: gap.question, reason: gap.reason },
+          });
+        }
+      }),
+    );
+  } catch (error) {
+    // Sigue sin tumbar la respuesta —el cliente ya la tiene calculada y perder
+    // una línea de contabilidad no justifica devolverle un 500— pero ahora se
+    // DICE. Un `catch {}` mudo es lo que dejó este camino roto sin que nadie lo
+    // notara: el síntoma era una lista de huecos vacía, que se lee como "no ha
+    // pasado nada" en vez de como "no se está midiendo".
+    log?.(error);
   }
 }
 

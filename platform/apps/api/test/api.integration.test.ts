@@ -117,6 +117,38 @@ describe(
     // Aislamiento — el test que decide si esto se puede vender
     // -----------------------------------------------------------------------
 
+    test("una búsqueda registra su consumo, y eso no era verdad", async () => {
+      // Regresión de un fallo que estuvo vivo toda la vida del proyecto y que
+      // nada delataba: `meter()` abría `withRlsTransaction` SIN contexto de
+      // tenant, así que lanzaba `TenantContextError` en cada llamada y un
+      // `catch {}` mudo se lo tragaba. Ni consumo ni huecos, nunca, desde la
+      // API. El síntoma era una lista vacía, que se lee como "no ha pasado
+      // nada" en vez de como "no se está midiendo".
+      // Se cuenta el EVENTO y no la fila de `usageRecord`: `recordUsage`
+      // publica en el outbox y es el worker quien materializa la fila, así que
+      // en un test sin worker la fila no llega nunca. Contarla mediría al
+      // worker, que no es lo que este test vigila.
+      const contar = () =>
+        systemPrisma.outboxEvent.count({
+          where: { tenantId: ACME, type: "usage.recorded" },
+        });
+      const antes = await contar();
+
+      const respuesta = await app.inject({
+        method: "POST",
+        url: "/v1/knowledge/search",
+        headers: auth(claveAcme),
+        payload: { query: "plazo para devolver un pedido" },
+      });
+      assert.equal(respuesta.statusCode, 200);
+
+      const despues = await contar();
+      assert.ok(
+        despues > antes,
+        "el consumo pasado no se reconstruye: lo que no se mida hoy se perdió",
+      );
+    });
+
     test("la clave de un tenant no ve NADA del otro", async () => {
       const respuesta = await app.inject({
         method: "POST",
