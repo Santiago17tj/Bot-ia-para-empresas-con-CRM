@@ -1,6 +1,6 @@
 import "@platform/env/load";
 
-import { rawPrisma, runAsSystem } from "@platform/db";
+import { runAsSystem, systemPrisma } from "@platform/db";
 import { generateApiKey } from "@platform/api";
 
 /**
@@ -35,8 +35,15 @@ async function main(): Promise<void> {
     );
   }
 
+  // `systemPrisma` y no `rawPrisma`. La diferencia se paga cara: `rawPrisma` se
+  // conecta con el rol de aplicación, así que las políticas RLS siguen
+  // aplicando — y `tenant` tiene la suya, `tenant_self`, que solo deja ver la
+  // fila cuyo id coincide con `app.tenant_id` de la SESIÓN de Postgres. Un
+  // script de línea de comandos no abre esa sesión, así que la consulta
+  // devolvía CERO FILAS y el script decía "No existe el tenant" de uno que sí
+  // existía. Emitir credenciales es administración, no la ruta de una petición.
   const tenant = await runAsSystem("emitir API key: comprobar el tenant", () =>
-    rawPrisma.tenant.findUnique({ where: { id: tenantId }, select: { slug: true } }),
+    systemPrisma.tenant.findUnique({ where: { id: tenantId }, select: { slug: true } }),
   );
 
   // Se comprueba antes de crear nada: una clave apuntando a un tenant que no
@@ -50,7 +57,7 @@ async function main(): Promise<void> {
   const effectiveScopes = scopes.length > 0 ? scopes : DEFAULT_SCOPES;
 
   await runAsSystem("emitir API key: crear la fila", () =>
-    rawPrisma.apiKey.create({
+    systemPrisma.apiKey.create({
       data: {
         tenantId,
         name,
@@ -71,11 +78,11 @@ async function main(): Promise<void> {
   console.log("  Esta clave no se vuelve a mostrar. Guárdala ahora.");
   console.log("");
 
-  await rawPrisma.$disconnect();
+  await systemPrisma.$disconnect();
 }
 
 main().catch(async (error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
-  await rawPrisma.$disconnect().catch(() => {});
+  await systemPrisma.$disconnect().catch(() => {});
   process.exitCode = 1;
 });
