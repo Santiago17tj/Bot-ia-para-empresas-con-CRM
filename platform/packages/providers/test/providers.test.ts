@@ -618,3 +618,81 @@ test("un modelo desconocido falla al construir, no en la primera llamada", async
     ProviderError,
   );
 });
+
+test("un 429 de cuota sin Retry-After lee la espera del cuerpo", async () => {
+  // El caso REAL, sacado de una tirada del arnés en CI: Groq no manda la
+  // cabecera `Retry-After` en sus 429 de cuota y en cambio dice el tiempo
+  // dentro del mensaje. Sin leerlo, el respaldo son 500 ms — que contra un
+  // límite de TOKENS POR MINUTO no sirve: hay que esperar a que ruede la
+  // ventana, no insistir más rápido. La medición murió a mitad y no emitió
+  // veredicto, que es peor que cualquier veredicto.
+  const cuerpoDeGroq = {
+    error: {
+      message:
+        "Rate limit reached for model `openai/gpt-oss-120b` on tokens per " +
+        "minute (TPM): Limit 8000, Used 6316, Requested 2171. Please try " +
+        "again in 0.4s.",
+      type: "tokens",
+      code: "rate_limit_exceeded",
+    },
+  };
+
+  await withStubServer(
+    (_call, attempt) =>
+      attempt === 1
+        ? { status: 429, body: cuerpoDeGroq }
+        : okResponse('{"ok":true}'),
+    async (baseUrl, calls) => {
+      const provider = new OpenAICompatibleProvider({
+        id: "prueba",
+        baseUrl,
+        model: "modelo-de-prueba",
+      });
+
+      const startedAt = performance.now();
+      await provider.generate({
+        messages: [{ role: "user", content: "hola" }],
+        maxTokens: 64,
+      });
+      const elapsed = performance.now() - startedAt;
+
+      assert.equal(calls.length, 2, "debió reintentar");
+      assert.ok(
+        elapsed >= 600,
+        `esperó solo ${Math.round(elapsed)} ms. El cuerpo pedía 0,4 s y se le ` +
+          "suma un margen: reintentar en el milisegundo exacto vuelve a chocar " +
+          "con la ventana más veces de lo que parece.",
+      );
+    },
+  );
+});
+
+test("un límite de cuota tiene más intentos que un fallo del servidor", async () => {
+  // Los dos merecen reintento, pero se arreglan de forma distinta: un 500 se
+  // arregla insistiendo y un 429 se arregla ESPERANDO. Con el mismo presupuesto
+  // para los dos, el de cuota se queda corto justo cuando la espera es larga.
+  await withStubServer(
+    (_call, attempt) =>
+      attempt <= 4
+        ? { status: 429, body: { error: { message: "try again in 0.01s" } } }
+        : okResponse('{"ok":true}'),
+    async (baseUrl, calls) => {
+      const provider = new OpenAICompatibleProvider({
+        id: "prueba",
+        baseUrl,
+        model: "modelo-de-prueba",
+        // Dos reintentos por defecto: sin el presupuesto ampliado para 429,
+        // esto se rendiría en el tercer intento.
+        maxRetries: 2,
+      });
+
+      const result = await provider.generate({
+        messages: [{ role: "user", content: "hola" }],
+        maxTokens: 64,
+      });
+
+      assert.equal(result.text, '{"ok":true}');
+      assert.equal(calls.length, 5, "aguantó los cuatro 429 antes de acertar");
+    },
+  );
+});

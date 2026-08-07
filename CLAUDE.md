@@ -25,7 +25,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 409 tests
+npm test                       # 411 tests
 ```
 
 **`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
@@ -34,7 +34,7 @@ resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
 Esta secuencia está **verificada contra un checkout limpio y un Postgres
-vacío**, no solo escrita: desde cero hasta los 409 tests en verde.
+vacío**, no solo escrita: desde cero hasta los 411 tests en verde.
 
 Ese «checkout limpio» hay que decirlo aparte, porque durante doce ejecuciones de
 CI la secuencia estuvo rota y en local no se notaba. `apply-sql.ts` importa
@@ -124,7 +124,7 @@ el chat da continuidad entre turnos.
 |---|---|---|
 | `env` | Carga del único `.env` de la raíz | — |
 | `db` | 28 modelos, aislamiento 3 capas, RLS | 11 + 9 int. |
-| `providers` | `AIProvider` + `EmbeddingProvider`, 2 adaptadores | 23 |
+| `providers` | `AIProvider` + `EmbeddingProvider`, 2 adaptadores | 25 |
 | `events` | Outbox transaccional + despachador | 11 |
 | `observability` | Trazas, Prompt Registry, siembra, consumo | 12 |
 | `context` | Context Engine, presupuesto, recetas | 22 |
@@ -316,23 +316,21 @@ si llegara a funcionar mediría un sistema distinto del calibrado.
 
 ## Estado actual del arnés
 
-Medición real, modo `full`, contra Postgres y Groq (`openai/gpt-oss-120b`).
-
-**Esta cifra es de ANTES de los casos conversacionales.** Son 10 casos; hoy el
-conjunto tiene 14. Volver a medirla con Groq es el primer punto de **Próximo
-paso** — hasta entonces, léase como el número del conjunto de un turno, que
-sigue siendo válido para lo que mide.
+Medición real, modo `full`, contra Postgres y Groq (`openai/gpt-oss-120b`), con
+el conjunto **completo de 14 casos** — los 10 de un turno más los 4 con hilo.
 
 ```
-Recall@k              100.0%  (6 casos)
+Casos                 14  (respondibles 9 · sin respuesta 5)
+Recall@k              100.0%  (9 casos)
 Precision             n/a  (ningún caso lo mide)
-Abstención correcta   100.0%   ← 4 casos, incluida la trampa
+Abstención correcta   100.0%
 Tasa de alucinación     0.0%
 Sobreabstención         0.0%
+Reescritura           100.0%  (4 casos)
 Respuestas erróneas     0.0%
 Fallos de citación      0.0%
-Latencia p50 / p95    2083 ms / 14962 ms
-Coste total          $0.0043   (precio de lista; el plan gratuito factura 0)
+Latencia p50 / p95    3992 ms / 24053 ms
+Coste total          $0.0062   (precio de lista; el plan gratuito factura 0)
 RESULTADO: PASA
 ```
 
@@ -341,9 +339,28 @@ RESULTADO: PASA
 nada del plazo de REEMBOLSO. Similitud alta, respuesta inexistente, ningún
 umbral la filtraría. El generador se abstiene.
 
-La latencia p95 de 15 s es de las abstenciones: el modelo razona más cuando
-decide que no puede responder. Es coste bien gastado, pero con streaming habrá
-que enseñar algo mientras tanto.
+**Los cuatro conversacionales aciertan, y dos merecen leerse.** `hilo-autonoma`
+tenía hilo y una pregunta que ya se entendía sola: el reescritor **la dejó
+intacta**, que es el fallo silencioso que ningún otro número habría delatado. Y
+`hilo-sin-reembolso` reescribió bien, recuperó el fragmento de los 30 días que
+acababa de citar en el turno anterior, y aun así se abstuvo.
+
+**La latencia sube con los casos conversacionales, y no es ruido.** El p95 pasa
+de 15 s (10 casos) a 24 s, y el detalle dice por qué: los casos con hilo tardan
+14–24 s porque son **dos llamadas al modelo, no una** — primero reescribir,
+después responder. Eso lo paga el cliente en cada turno de seguimiento. Con
+streaming se disimula; sin streaming son veinticuatro segundos de pantalla
+quieta.
+
+Para comparar: la tirada anterior, con los 10 casos de un turno, daba p50 2083 ms
+y p95 14962 ms por $0,0043.
+
+**Ojo con leer un fallo de esta medición como un veredicto.** La primera vez que
+CI la ejecutó salió con código 1 y se leyó como "la puerta bloquea". No había
+bloqueado: Groq devolvió 429 por límite de tokens por minuto y la medición murió
+a mitad, sin emitir veredicto. Un arnés que se cae y uno que bloquea son cosas
+distintas, y el código de salida no las distingue — hay que mirar el informe.
+Ver **El 429 que no se reintentaba bien**.
 
 ## La decisión del generador, resuelta
 
@@ -376,7 +393,10 @@ sale a $0,0043.
 
 ## Los tres generadores, medidos
 
-Mismo conjunto, mismo corpus, misma máquina:
+Mismo corpus y misma máquina. **Esta comparación es de los 10 casos de un
+turno**, antes de los conversacionales: repetirla con los 14 exigiría dos
+tiradas locales de horas contra el 7B, y lo que mide —que ninguno inventa— no
+depende de esos cuatro casos.
 
 | | Groq `gpt-oss-120b` | local `qwen2.5:7b` | local `qwen2.5:3b` |
 |---|---|---|---|
@@ -488,7 +508,7 @@ integración se bloquean entre ellos y fallan por algo que no es el código.
 `.github/workflows/ci.yml`, dos jobs:
 
 - **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
-  ICU que `docker-compose.yml`. Ejecuta los 409 tests, integración incluida:
+  ICU que `docker-compose.yml`. Ejecuta los 411 tests, integración incluida:
   con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
 - **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
   secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
@@ -531,6 +551,32 @@ Dos detalles que costaron y no son obvios:
 La lógica de emitir credenciales se sacó del script a `issueApiKey` en
 `@platform/api`. Mientras vivió dentro de `scripts/issue-key.ts` ningún test la
 tocaba, y estuvo rota desde el primer día.
+
+### El 429 que no se reintentaba bien
+
+La primera vez que CI llegó a ejecutar el arnés, salió con código 1. Se leyó
+como "la puerta bloquea". No era eso:
+
+```
+groq devolvió 429: Rate limit reached ... on tokens per minute (TPM):
+Limit 8000, Used 6316, Requested 2171. Please try again in 3.6525s
+```
+
+La medición **murió a mitad y no emitió veredicto**. Un arnés que se cae y uno
+que bloquea son cosas distintas y el código de salida no las distingue: hay que
+mirar el informe antes de contar el resultado.
+
+La causa era del adaptador. Reintentaba los 429 —eso ya estaba— pero leía la
+espera solo de la cabecera `Retry-After`, y **Groq no la manda** en sus 429 de
+cuota: dice el tiempo dentro del mensaje. Sin leerlo caía al respaldo de 500 ms,
+que contra un límite de TOKENS POR MINUTO no sirve de nada — hay que esperar a
+que ruede la ventana, no insistir más rápido. Ahora se lee del cuerpo, y un 429
+tiene más intentos que un 500: los dos merecen reintento, pero uno se arregla
+esperando y el otro insistiendo.
+
+El plan gratuito de Groq son 8.000 tokens por minuto, y una tirada de 14 casos
+—con la llamada extra de reescritura en los conversacionales— los roza. Si
+vuelve a aparecer, no es el pipeline: es la cuota.
 
 ### La CI nunca había pasado
 
@@ -965,13 +1011,6 @@ con servidor simulado no pueden cubrir, y son dos ratos cortos:
   de páginas, crear la fuente con el token.
 - Drive: cuenta de servicio en Google Cloud, habilitar la API de Drive,
   compartir una carpeta con su correo, pegar el JSON.
-
-**Volver a medir la puerta con Groq.** Los casos conversacionales ya están y los
-tests pasan, pero la cifra de la tabla de "Estado actual del arnés" es de ANTES
-de añadirlos: son cuatro casos más, y uno de ellos —`hilo-sin-reembolso`— es más
-duro que cualquiera de los de un turno. Hace falta una tirada de `npm run eval`
-con `AI_PROVIDER="groq"` y una `GROQ_API_KEY` con valor en `platform/.env` — ver
-**Dónde viven las claves**.
 
 `/v1/contacts` **ya está**, y con ello la superficie de la API de §27 queda
 completa. Ver **Contactos**.

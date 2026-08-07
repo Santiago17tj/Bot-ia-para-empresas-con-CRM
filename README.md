@@ -39,8 +39,9 @@ La métrica que decide si un producto así es vendible no es el acierto: es la
 lo que no sabe puntúa alto en recall y es inservible — peor que inservible,
 porque una respuesta inventada con una cita al lado parece fundada.
 
-Medición real contra Postgres y Groq (`openai/gpt-oss-120b`), 10 preguntas de un
-solo turno, un tercio de ellas **sin respuesta en el corpus**:
+Medición real contra Postgres y Groq (`openai/gpt-oss-120b`), 14 preguntas —
+nueve respondibles y cinco **sin respuesta en el corpus**, cuatro de ellas con
+hilo de conversación:
 
 | | |
 |---|---|
@@ -49,16 +50,18 @@ solo turno, un tercio de ellas **sin respuesta en el corpus**:
 | Sobreabstención | 0 % |
 | Fallos de citación | 0 % |
 | Recall@k | 100 % |
-| Latencia p50 / p95 | 2,1 s / 15 s |
-| Coste de la tirada | $0,0043 |
+| Reescritura de seguimientos | 100 % |
+| Latencia p50 / p95 | 4,0 s / 24,1 s |
+| Coste de la tirada | $0,0062 |
 
 El caso que lo demuestra es `sin-plazo-reembolso`: el corpus fija el plazo para
 DEVOLVER un pedido (30 días) y no dice nada del plazo de REEMBOLSO. Similitud
 alta, respuesta inexistente, ningún umbral la filtraría. El generador se
 abstiene.
 
-Y la arquitectura aguanta sin el modelo grande. Mismo conjunto, tres
-generadores:
+Y la arquitectura aguanta sin el modelo grande. Tres generadores sobre el mismo
+corpus — esta comparación es de los 10 casos de un turno, antes de añadir los
+conversacionales:
 
 | | Groq `gpt-oss-120b` | local `qwen2.5:7b` | local `qwen2.5:3b` |
 |---|---|---|---|
@@ -71,9 +74,10 @@ generadores:
 —salida estructurada con citas obligatorias más validación en código— sino la
 utilidad: los pequeños se callan cosas que sí sabían.
 
-El conjunto tiene hoy 14 casos; los 4 conversacionales se añadieron después de
-esa tirada y las cifras de arriba son las de los 10 de un turno. Para repetirla,
-pon `AI_PROVIDER` y `GROQ_API_KEY` en `platform/.env` y ejecuta:
+La latencia sube con los casos conversacionales y no es ruido: un seguimiento
+son **dos llamadas al modelo, no una** —primero reescribir, después responder— y
+eso lo paga el cliente en cada turno. Para repetir la medición, pon
+`AI_PROVIDER` y `GROQ_API_KEY` en `platform/.env` y ejecuta:
 
 ```bash
 npm run eval
@@ -91,7 +95,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector, en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 409 tests
+npm test                       # 411 tests
 ```
 
 **`setup`, no `db:migrate`.** `prisma migrate dev` interpreta como deriva las
@@ -100,7 +104,7 @@ resetear la base; decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` más el SQL crudo, que es lo correcto y lo que usa CI.
 
 Esta secuencia está verificada contra un checkout limpio y un Postgres vacío, no
-solo escrita: desde cero hasta los 409 tests en verde.
+solo escrita: desde cero hasta los 411 tests en verde.
 
 Para levantarlo:
 

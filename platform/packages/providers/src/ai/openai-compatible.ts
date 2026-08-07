@@ -255,7 +255,15 @@ export class OpenAICompatibleProvider implements AIProvider {
   async #post(body: Record<string, unknown>): Promise<ChatCompletionResponse> {
     let lastError: ProviderError | undefined;
 
-    for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
+    // Un límite de cuota merece más intentos que un fallo del servidor, y no
+    // porque sea más grave: porque se arregla ESPERANDO, y esperar dos veces
+    // medio segundo no espera nada. Una tirada del arnés son decenas de
+    // llamadas seguidas contra un plan gratuito de 8.000 tokens por minuto; sin
+    // esto la medición muere a mitad y no emite veredicto, que es peor que
+    // cualquier veredicto.
+    let budget = this.#maxRetries;
+
+    for (let attempt = 0; attempt <= budget; attempt++) {
       if (attempt > 0) {
         // `??` y no `||`: un `Retry-After: 0` es una instrucción —reintenta ya—
         // y tratarlo como ausente añadiría medio segundo a cada reintento por
@@ -269,6 +277,7 @@ export class OpenAICompatibleProvider implements AIProvider {
       } catch (error) {
         if (!(error instanceof ProviderError) || !error.retryable) throw error;
         lastError = error;
+        if (error.status === 429) budget = Math.max(budget, RATE_LIMIT_RETRIES);
       }
     }
 
@@ -303,13 +312,21 @@ export class OpenAICompatibleProvider implements AIProvider {
 
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
+      // La cabecera primero; si no viene, el cuerpo. Groq no manda
+      // `Retry-After` en sus 429 de cuota y en cambio dice el tiempo dentro del
+      // mensaje ("Please try again in 3.6525s"). Sin leerlo, el respaldo son
+      // 500 ms — que contra un límite de TOKENS POR MINUTO no sirve de nada:
+      // hay que esperar a que ruede la ventana, no insistir más rápido.
+      const retryAfter =
+        parseRetryAfter(response.headers.get("retry-after")) ?? parseRetryFromBody(detail);
+
       throw new ProviderError(
         `${this.id} devolvió ${response.status}: ${detail.slice(0, 500)}`,
         this.id,
         response.status === 408 || response.status === 429 || response.status >= 500,
         undefined,
         retryAfter,
+        response.status,
       );
     }
 
@@ -465,6 +482,36 @@ function mapFinishReason(reason: string | null): GenerationResult["stopReason"] 
 }
 
 /** `Retry-After` viene en segundos o como fecha HTTP, según el servidor. */
+/**
+ * Cuántos intentos se le dan a un 429.
+ *
+ * Seis, y el número sale de la aritmética: el plan gratuito de Groq limita a
+ * 8.000 tokens por minuto, así que la espera más larga que puede pedir es la
+ * ventana entera. Con las esperas que el propio servidor indica, seis intentos
+ * cubren de sobra un minuto sin colgar la medición indefinidamente.
+ */
+const RATE_LIMIT_RETRIES = 6;
+
+/**
+ * El tiempo de espera escondido en el cuerpo del error.
+ *
+ * Groq no manda `Retry-After` en sus 429 de cuota; lo dice en el mensaje:
+ * "Please try again in 3.6525s". Se acepta también el formato con minutos que
+ * usan otros backends compatibles ("try again in 1m2.5s").
+ */
+function parseRetryFromBody(detail: string): number | undefined {
+  const conMinutos = /try again in (?:(\d+)m)?([\d.]+)s/i.exec(detail);
+  if (conMinutos === null) return undefined;
+
+  const minutos = Number(conMinutos[1] ?? 0);
+  const segundos = Number(conMinutos[2]);
+  if (!Number.isFinite(segundos)) return undefined;
+
+  // Un poco de margen: reintentar en el milisegundo exacto que dijo el
+  // servidor vuelve a chocar con la ventana más veces de las que parece.
+  return Math.round((minutos * 60 + segundos) * 1000) + 250;
+}
+
 function parseRetryAfter(header: string | null): number | undefined {
   if (header === null) return undefined;
 

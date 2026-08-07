@@ -126,6 +126,15 @@ export class ProviderError extends Error {
      * reintenta antes de tiempo y vuelve a agotar la cuota.
      */
     readonly retryAfterMs?: number,
+    /**
+     * Código HTTP, cuando lo hubo.
+     *
+     * Se guarda para poder distinguir un límite de CUOTA de un fallo del
+     * servidor: los dos merecen reintento, pero un 429 se arregla esperando y
+     * un 500 se arregla insistiendo. Con solo `retryable` los dos reciben el
+     * mismo trato y el de cuota se queda corto.
+     */
+    readonly status?: number,
   ) {
     super(message);
   }
