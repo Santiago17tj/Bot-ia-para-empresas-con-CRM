@@ -55,7 +55,7 @@ export function createIngestHandler(deps: {
       // marca permanente para que el diagnóstico salga ya y no dentro de una
       // hora de backoff.
       const missing = error instanceof StorageError && error.code === "not_found";
-      await markFailed(ctx, payload.documentId, describe(error));
+      await markFailed(ctx, payload.documentId, describe(error), log);
       throw new EventHandlingError(
         `No se pudieron leer los bytes de ${payload.storageKey}: ${describe(error)}`,
         missing,
@@ -108,7 +108,7 @@ export function createIngestHandler(deps: {
         ),
       );
     } catch (error) {
-      await markFailed(ctx, payload.documentId, describe(error));
+      await markFailed(ctx, payload.documentId, describe(error), log);
 
       // El fallo del documento se publica además como evento: es lo que un
       // panel escucha para avisar a quien subió el fichero. Va fuera del
@@ -140,6 +140,7 @@ async function markFailed(
   ctx: { tenantId: string; actor: { type: "system"; id: string; scopes: never[] }; requestId: string },
   documentId: string,
   reason: string,
+  log: (message: string) => void = () => {},
 ): Promise<void> {
   try {
     // Dentro de `withRlsTransaction`, no solo de `runWithTenant`: las políticas
@@ -154,9 +155,19 @@ async function markFailed(
         }),
       ),
     );
-  } catch {
-    // Si ni siquiera se puede marcar el fallo, lo que queda es la excepción
-    // que sube al despachador y acaba en la cola de eventos muertos.
+  } catch (error) {
+    // Si ni siquiera se puede marcar el fallo, la excepción sube al despachador
+    // y el evento acaba en la cola de muertos. Pero el DOCUMENTO se queda en
+    // PENDING para siempre y sin motivo, que es justo lo que este camino
+    // existía para evitar — así que como mínimo se dice.
+    //
+    // No es teórico: bajo carga, `withRlsTransaction` expira por el event loop
+    // bloqueado (el proveedor de embeddings corre ONNX en el hilo principal) y
+    // este `catch` se lo tragaba entero.
+    log(
+      `[worker] no se pudo marcar FAILED el documento ${documentId}: ` +
+        `${describe(error)}. Se queda en PENDING.`,
+    );
   }
 }
 

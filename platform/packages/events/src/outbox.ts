@@ -33,17 +33,32 @@ export async function publish(
   tx: Prisma.TransactionClient,
   options: PublishOptions,
 ): Promise<void> {
-  const availableAt =
-    options.delayMs === undefined || options.delayMs <= 0
-      ? new Date()
-      : new Date(Date.now() + options.delayMs);
+  // Sin retraso NO se fija `availableAt`: lo pone el default de la columna,
+  // que es `CURRENT_TIMESTAMP` de Postgres.
+  //
+  // Parece un detalle y no lo es. El despachador reclama con
+  // `availableAt <= now()`, y ese `now()` es el reloj de POSTGRES. Poniendo
+  // aquí `new Date()` —el reloj de NODE— se comparan dos relojes distintos, y
+  // si el de Postgres va detrás el evento es invisible hasta que lo alcanza.
+  // Medido en esta máquina: 6 ms de desfase.
+  //
+  // En producción no se nota, porque el worker sondea cada dos segundos y seis
+  // milisegundos se pierden en el ruido. Se notaba en los tests, que publican y
+  // drenan seguido: caían dentro de la ventana, `drain()` no encontraba nada,
+  // `drainAll` cortaba en la primera pasada por `processed === 0`, y el
+  // documento se quedaba en PENDING. Un test intermitente cuya causa real era
+  // comparar dos relojes.
+  const delayed =
+    options.delayMs !== undefined && options.delayMs > 0
+      ? { availableAt: new Date(Date.now() + options.delayMs) }
+      : {};
 
   await tx.outboxEvent.create({
     data: {
       type: options.type,
       tenantId: options.tenantId ?? null,
       payload: options.payload as Prisma.InputJsonValue,
-      availableAt,
+      ...delayed,
       maxAttempts: options.maxAttempts ?? 5,
     },
   });
@@ -56,16 +71,16 @@ export async function publishMany(
 ): Promise<void> {
   if (events.length === 0) return;
 
+  // Mismo criterio que `publish`: sin retraso lo pone el default de Postgres.
   const now = Date.now();
   await tx.outboxEvent.createMany({
     data: events.map((e) => ({
       type: e.type,
       tenantId: e.tenantId ?? null,
       payload: e.payload as Prisma.InputJsonValue,
-      availableAt:
-        e.delayMs === undefined || e.delayMs <= 0
-          ? new Date(now)
-          : new Date(now + e.delayMs),
+      ...(e.delayMs !== undefined && e.delayMs > 0
+        ? { availableAt: new Date(now + e.delayMs) }
+        : {}),
       maxAttempts: e.maxAttempts ?? 5,
     })),
   });

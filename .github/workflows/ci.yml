@@ -56,6 +56,18 @@ jobs:
       EMBEDDING_DIMENSIONS: "384"
       STORAGE_DRIVER: local
       STORAGE_LOCAL_PATH: ./.storage
+      # Clave de cifrado de prueba, EN CLARO y a propósito.
+      #
+      # No es un secreto: protege una base de datos que se crea y se destruye
+      # dentro de este job, así que guardarla en Settings → Secrets sugeriría
+      # que hay algo que proteger y escondería que este valor es desechable.
+      #
+      # Sin ella, la API responde 503 al guardar un token de conector —"sin
+      # clave configurada NO se guarda nada en claro"— y los tests de secretos
+      # fallan con 503 en vez de 201. Que es exactamente lo que hacían: como el
+      # job de tests nunca llegó a ejecutarse, este agujero llevaba ahí desde
+      # que se añadió `@platform/secrets` sin que nadie lo viera.
+      SECRETS_ENCRYPTION_KEY: wcT3m8ICMFSGMJqhY5SAqi1JQlqkiS3yWe7lV1SfSKQ=
       NODE_ENV: test
 
     steps:
