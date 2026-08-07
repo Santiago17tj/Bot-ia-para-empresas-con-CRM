@@ -25,7 +25,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 411 tests
+npm test                       # 415 tests
 ```
 
 **`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
@@ -34,7 +34,7 @@ resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
 Esta secuencia está **verificada contra un checkout limpio y un Postgres
-vacío**, no solo escrita: desde cero hasta los 411 tests en verde.
+vacío**, no solo escrita: desde cero hasta los 415 tests en verde.
 
 Ese «checkout limpio» hay que decirlo aparte, porque durante doce ejecuciones de
 CI la secuencia estuvo rota y en local no se notaba. `apply-sql.ts` importa
@@ -158,7 +158,7 @@ Hay **dos excepciones sancionadas**, y ninguna de las dos es una petición:
 credencial, que es justo lo que aún no se sabe— y el planificador, que por
 definición mira todos los tenants para saber a quién le toca sincronizar. Las
 dos están encapsuladas con nombre propio para poder auditarlas leyendo quién las
-llama. Ver **Cuatro trampas de este entorno**.
+llama. Ver **Cinco trampas de este entorno**.
 
 **`publish()` exige el cliente de transacción del llamante.** Es la garantía
 entera del outbox: si abriera su propia conexión, podría confirmarse mientras el
@@ -508,7 +508,7 @@ integración se bloquean entre ellos y fallan por algo que no es el código.
 `.github/workflows/ci.yml`, dos jobs:
 
 - **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
-  ICU que `docker-compose.yml`. Ejecuta los 411 tests, integración incluida:
+  ICU que `docker-compose.yml`. Ejecuta los 415 tests, integración incluida:
   con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
 - **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
   secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
@@ -657,9 +657,22 @@ Tres motivos, y no significan lo mismo: `BELOW_THRESHOLD` (no había ni
 material), `MODEL_ABSTAINED` (había documentación cercana que no cubría el caso
 — el más accionable) y `GROUNDING_FAILED` (además el modelo intentó rellenarlo).
 
-Sin generador configurado **no se agrupa**: cada abstención abre su fila. Peor
-informe, pero no es un dato perdido — y es mejor que agrupar con un umbral que
-la medición dice que no existe.
+**El texto idéntico no pasa por el generador.** Antes de preguntarle a nadie se
+busca la coincidencia literal —sin acentos, mayúsculas ni signos— entre los
+candidatos y sus variantes. No es una optimización: sin esto, la MISMA pregunta
+hecha dos veces iba al modelo y el modelo podía decir que no. Visto en el panel
+con un modelo real: dos filas idénticas con «1 vez» cada una donde debía haber
+una con 2, y el log del worker diciendo «hueco NUEVO (1 candidatos
+descartados)». Una lista de huecos con duplicados rompe justo lo que esa lista
+resuelve.
+
+Lo que el atajo NO hace es parecerse. «¿Cuánto CUESTA el envío?» y «¿cuánto
+TARDA el envío?» siguen siendo dos huecos, y eso lo decide el generador, porque
+está medido que el coseno no los distingue.
+
+Sin generador configurado se agrupa **solo lo idéntico**: mejor informe que
+antes —cada repetición exacta ya no abre fila— y sigue sin agrupar con un umbral
+que la medición dice que no existe.
 
 ## Conectores
 
@@ -1042,11 +1055,11 @@ npm run eval
 - **Prisma 6.19 vs 7.x.** Se arrancó en 6.19 por estabilidad.
 - **`.gitattributes`.** Git avisa de conversión LF→CRLF; sin él, un equipo mixto
   verá ficheros enteros como modificados sin tocarlos. Ya dejó de ser solo
-  cosmético una vez: rompió la siembra de prompts (ver **Cuatro trampas**). Eso
+  cosmético una vez: rompió la siembra de prompts (ver **Cinco trampas**). Eso
   está arreglado donde tocaba —en el parser, no en git— pero el aviso sigue en
   pie para el resto de ficheros.
 
-## Cuatro trampas de este entorno
+## Cinco trampas de este entorno
 
 **`prisma generate` falla con EPERM si hay un proceso vivo con el cliente
 cargado.** Windows bloquea `query_engine-windows.dll.node` y el renombrado del
@@ -1079,6 +1092,25 @@ Arreglado en `parsePromptFile`, que normaliza a LF antes de nada. Ahí y no en u
 los que ya existen, y porque el registro debe ser insensible a esto aunque el
 fichero llegue de cualquier otra forma. Pasó de verdad al abrir un worktree para
 los casos conversacionales: 23 tests cancelados, ninguno relacionado.
+
+**Prisma calcula `@default(now())` en el CLIENTE.** Manda la marca de tiempo de
+Node en el INSERT en vez de dejar que la ponga Postgres, y eso rompe cualquier
+columna que después se compare contra `now()` de la base. Le pasó a
+`OutboxEvent.availableAt`: el despachador reclama con `availableAt <= now()`, y
+bastaba con que el reloj de Node fuera por delante para que un evento recién
+publicado no fuera visible todavía. Medido: **493 ms en el futuro**, evento en
+PENDING con cero intentos.
+
+En producción no se nota —el worker sondea cada dos segundos— pero hacía
+intermitentes los tests que publican y drenan seguido, con un síntoma que manda
+a adivinar: «el documento sigue en PENDING». Costó tres hipótesis equivocadas
+antes de instrumentar el test para que dijera el estado del evento y el `now()`
+de Postgres, que es lo que lo resolvió en una ejecución.
+
+Se arregla con `@default(dbgenerated("CURRENT_TIMESTAMP"))`: así Prisma omite la
+columna y la rellena la base. Quitarla del `create` NO basta — Prisma la rellena
+igual mientras el default sea `now()`. El DDL no cambia, ya era
+`DEFAULT CURRENT_TIMESTAMP`.
 
 **Las transacciones expiran por el event loop, no por su propio trabajo.** El
 proveedor de embeddings local corre ONNX en el hilo principal y lo bloquea

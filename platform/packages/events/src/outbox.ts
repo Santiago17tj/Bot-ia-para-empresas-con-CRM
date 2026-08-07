@@ -33,8 +33,13 @@ export async function publish(
   tx: Prisma.TransactionClient,
   options: PublishOptions,
 ): Promise<void> {
-  // Sin retraso NO se fija `availableAt`: lo pone el default de la columna,
-  // que es `CURRENT_TIMESTAMP` de Postgres.
+  // Sin retraso NO se fija `availableAt`: lo pone el default de la columna.
+  //
+  // Omitirlo aquí es NECESARIO pero no suficiente, y eso costó un rato: con
+  // `@default(now())` Prisma calcula la marca de tiempo en el CLIENTE y la manda
+  // igualmente, así que el valor seguía saliendo del reloj de Node. Por eso el
+  // esquema declara `@default(dbgenerated("CURRENT_TIMESTAMP"))` — con eso
+  // Prisma omite la columna de verdad y la rellena Postgres.
   //
   // Parece un detalle y no lo es. El despachador reclama con
   // `availableAt <= now()`, y ese `now()` es el reloj de POSTGRES. Poniendo

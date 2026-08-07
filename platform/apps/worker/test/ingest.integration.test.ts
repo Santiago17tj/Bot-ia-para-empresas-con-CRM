@@ -128,6 +128,36 @@ async function procesarCola(): Promise<void> {
   await dispatcher.drainAll();
 }
 
+/**
+ * Por qué un documento no llegó a READY.
+ *
+ * Un "sigue en PENDING" a secas manda a adivinar entre tres cosas distintas: el
+ * consumidor falló, el despachador no reclamó el evento, o el evento no era
+ * visible todavía. Esto las separa. Se escribió persiguiendo un fallo
+ * intermitente que costó tres hipótesis equivocadas.
+ */
+async function porQueNoIndexo(documentId?: string): Promise<string> {
+  const eventos = await systemPrisma.outboxEvent.findMany({
+    where: { type: "document.uploaded" },
+    select: {
+      status: true,
+      attempts: true,
+      lockedBy: true,
+      availableAt: true,
+      lastError: true,
+      tenantId: true,
+    },
+    orderBy: { createdAt: "desc" },
+    take: 4,
+  });
+  const ahora = await systemPrisma.$queryRaw<{ t: Date }[]>`SELECT now() AS t`;
+
+  return (
+    `documento ${documentId ?? "?"} · now() de Postgres ${ahora[0]?.t.toISOString()} · ` +
+    `eventos document.uploaded recientes: ${JSON.stringify(eventos)}`
+  );
+}
+
 describe(
   "ingesta de punta a punta",
   { skip: process.env["DATABASE_URL"] === undefined },
@@ -222,7 +252,11 @@ describe(
       const [doc] = documentos.json<{ documents: { id: string; status: string }[] }>()
         .documents;
       assert.ok(doc);
-      assert.equal(doc.status, "READY", "el worker debería haberlo indexado");
+      assert.equal(
+        doc.status,
+        "READY",
+        `el worker debería haberlo indexado — ${await porQueNoIndexo(doc.id)}`,
+      );
 
       const detalle = await app.inject({
         method: "GET",
@@ -317,7 +351,8 @@ describe(
       assert.equal(
         detalle.json<{ status: string; error: string | null }>().status,
         "READY",
-        `el PDF no se indexó: ${detalle.json<{ error: string | null }>().error ?? ""}`,
+        `el PDF no se indexó: ${detalle.json<{ error: string | null }>().error ?? ""} — ` +
+          (await porQueNoIndexo()),
       );
 
       const busqueda = await app.inject({

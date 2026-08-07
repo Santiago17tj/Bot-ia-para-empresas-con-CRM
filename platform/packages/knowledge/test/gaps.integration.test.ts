@@ -223,5 +223,70 @@ describe(
         await systemPrisma.tenant.delete({ where: { id: OTRO } });
       }
     });
+
+    // --- Coincidencia literal ------------------------------------------------
+
+    test("la MISMA pregunta no abre dos huecos, ni con un decisor que nunca agrupa", async () => {
+      // Visto en el panel, con un modelo real: dos filas idénticas con "1 vez"
+      // cada una. El vector encontraba el duplicado y el generador lo
+      // descartaba. Un texto idéntico no tiene nada que decidir, así que ya no
+      // se le pregunta a nadie.
+      const pregunta = "¿Cuántos días tardáis en devolverme el dinero?";
+
+      const primera = await registrar(pregunta, nuncaAgrupa);
+      const segunda = await registrar(pregunta, nuncaAgrupa);
+
+      assert.equal(primera.grouped, false, "la primera vez siempre es nueva");
+      assert.equal(segunda.grouped, true, "la segunda es la misma pregunta");
+      assert.equal(segunda.gapId, primera.gapId);
+      assert.equal(segunda.occurrences, 2);
+    });
+
+    test("agrupa aunque cambien acentos, mayúsculas y signos", async () => {
+      // Son dos personas escribiendo la misma pregunta, no dos preguntas. Con
+      // comparación literal estricta, la lista se llena de casi-duplicados y
+      // deja de servir para lo único que sirve: ordenar por veces.
+      // Pregunta propia de este test: «financiación» ya la usan otros de arriba
+      // y el hueco llega con ocurrencias previas, así que un número absoluto
+      // mediría el orden de los tests en vez de el agrupamiento.
+      const original = await registrar("¿Aceptáis pagos con Bizum?", nuncaAgrupa);
+      const variante = await registrar("aceptais pagos con bizum", nuncaAgrupa);
+
+      assert.equal(original.grouped, false, "la primera es nueva");
+      assert.equal(variante.grouped, true);
+      assert.equal(variante.gapId, original.gapId);
+      assert.equal(
+        variante.occurrences,
+        original.occurrences + 1,
+        "se cuenta el incremento, no el total",
+      );
+    });
+
+    test("sin decisor también agrupa lo idéntico", async () => {
+      // Antes, sin generador configurado, cada abstención abría fila aunque
+      // fuera la repetición exacta de la anterior. Agrupar por texto no necesita
+      // modelo, así que no hay motivo para no hacerlo.
+      const pregunta = "¿Hacéis envíos a Andorra?";
+
+      const primera = await registrar(pregunta);
+      const segunda = await registrar(pregunta);
+
+      assert.equal(primera.grouped, false);
+      assert.equal(segunda.grouped, true);
+      assert.equal(segunda.occurrences, 2);
+    });
+
+    test("dos preguntas distintas del mismo tema siguen siendo dos huecos", async () => {
+      // La otra mitad, y la que impide que el atajo se coma el matiz: el atajo
+      // solo resuelve lo IDÉNTICO. Está medido que el coseno no distingue
+      // "cuánto CUESTA el envío" de "cuánto TARDA el envío" —0,885 y 0,948, al
+      // revés de lo intuitivo— así que eso lo sigue decidiendo el generador.
+      const cuesta = await registrar("¿Cuánto cuesta el envío a Baleares?", nuncaAgrupa);
+      const tarda = await registrar("¿Cuánto tarda el envío a Baleares?", nuncaAgrupa);
+
+      assert.equal(tarda.grouped, false, "no son la misma pregunta");
+      assert.notEqual(tarda.gapId, cuesta.gapId);
+    });
+
   },
 );

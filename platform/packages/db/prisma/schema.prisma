@@ -878,7 +878,23 @@ model OutboxEvent {
   attempts    Int          @default(0)
   maxAttempts Int          @default(5)
   // Retroceso exponencial: el despachador solo reclama filas con availableAt <= now.
-  availableAt DateTime     @default(now())
+  //
+  // `dbgenerated` y NO `now()`, y la diferencia no es cosmética: con
+  // `@default(now())` Prisma calcula la marca de tiempo EN EL CLIENTE y la manda
+  // en el INSERT, así que el valor sale del reloj de Node. El despachador
+  // reclama con `availableAt <= now()`, que es el reloj de POSTGRES. Son dos
+  // relojes y basta con que el de Node vaya medio segundo por delante para que
+  // un evento recién publicado no sea visible todavía.
+  //
+  // Medido: `availableAt` 493 ms en el futuro respecto al `now()` de Postgres,
+  // con el evento en PENDING y cero intentos. En producción no se nota —el
+  // worker sondea cada dos segundos— pero hacía intermitentes los tests que
+  // publican y drenan seguido, y una puerta intermitente no la mira nadie.
+  //
+  // Con `dbgenerated`, Prisma omite la columna y la rellena Postgres: los dos
+  // lados de la comparación salen del mismo reloj. El DDL no cambia, ya era
+  // `DEFAULT CURRENT_TIMESTAMP`.
+  availableAt DateTime     @default(dbgenerated("CURRENT_TIMESTAMP"))
   lockedAt    DateTime?
   lockedBy    String?
   lastError   String?

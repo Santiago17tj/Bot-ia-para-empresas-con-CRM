@@ -2,6 +2,7 @@ import { Prisma, type Prisma as PrismaNS } from "@platform/db";
 import type { EmbeddingProvider } from "@platform/providers";
 
 import { columnForDimensions } from "./dimensions.js";
+import { normalizeForComparison } from "./grounding.js";
 import { embedQuery } from "./ingest.js";
 
 /**
@@ -128,10 +129,25 @@ export async function recordGap(
     findCandidates(tx, input.tenantId, deps.embedder, column, vector),
   );
 
+  // **Un texto idéntico no tiene nada que decidir.** Antes de preguntarle a
+  // nadie se busca la coincidencia literal entre los candidatos y sus variantes.
+  //
+  // No es una optimización, es una corrección. Sin esto, la MISMA pregunta
+  // hecha dos veces iba al generador, y el generador puede decir que no: visto
+  // en el panel, dos filas idénticas con "1 vez" cada una donde debía haber una
+  // con 2. Y una lista de huecos con duplicados rompe justo lo que esa lista
+  // resuelve — distinguir la anécdota de lo que preguntan treinta.
+  //
+  // Además vale sin generador: hasta ahora, sin uno configurado, cada abstención
+  // abría fila aunque fuera la repetición exacta de la anterior.
+  const exact = candidates.find((candidate) => sameQuestion(candidate, question));
+
   const matchId =
-    candidates.length > 0 && deps.match !== undefined
-      ? await deps.match(question, candidates)
-      : null;
+    exact !== undefined
+      ? exact.id
+      : candidates.length > 0 && deps.match !== undefined
+        ? await deps.match(question, candidates)
+        : null;
 
   // Un id que no estaba entre los candidatos es un id inventado. Se descarta en
   // vez de confiar: es la misma comprobación que se le hace a una cita.
@@ -233,6 +249,36 @@ async function findCandidates(
  * lista es enseñar el vocabulario del cliente, y diez copias de la misma frase
  * no enseñan nada.
  */
+/**
+ * ¿Es literalmente la misma pregunta que este candidato o alguna de sus
+ * variantes?
+ *
+ * Se compara sin acentos, sin mayúsculas, sin signos y sin espacios de más:
+ * «¿Ofrecéis financiación?» y «ofreceis financiacion» son la misma pregunta
+ * escrita por dos personas distintas, y tratarlas como dos huecos es el mismo
+ * error que no agrupar nada.
+ *
+ * Lo que NO hace es parecerse: eso lo decide el generador, porque está medido
+ * que el coseno no distingue «¿cuánto CUESTA el envío?» de «¿cuánto TARDA el
+ * envío?». Aquí solo se resuelve el caso en el que no hay nada que decidir.
+ */
+function sameQuestion(candidate: GapCandidate, question: string): boolean {
+  const target = comparable(question);
+  if (target === "") return false;
+
+  return (
+    comparable(candidate.question) === target ||
+    candidate.variants.some((variant) => comparable(variant) === target)
+  );
+}
+
+function comparable(text: string): string {
+  return normalizeForComparison(text)
+    .replace(/[¿?¡!.,;:]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function nextVariants(candidate: GapCandidate, question: string): string[] {
   if (question === candidate.question.trim()) return candidate.variants;
   if (candidate.variants.includes(question)) return candidate.variants;
