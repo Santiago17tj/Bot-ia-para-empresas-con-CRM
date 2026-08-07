@@ -91,7 +91,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector, en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 408 tests
+npm test                       # 409 tests
 ```
 
 **`setup`, no `db:migrate`.** `prisma migrate dev` interpreta como deriva las
@@ -100,7 +100,7 @@ resetear la base; decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` más el SQL crudo, que es lo correcto y lo que usa CI.
 
 Esta secuencia está verificada contra un checkout limpio y un Postgres vacío, no
-solo escrita: desde cero hasta los 408 tests en verde.
+solo escrita: desde cero hasta los 409 tests en verde.
 
 Para levantarlo:
 

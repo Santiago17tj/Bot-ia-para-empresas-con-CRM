@@ -16,6 +16,8 @@ export {
 } from "./auth.js";
 export type { AuthenticatedKey, IssuedKey } from "./auth.js";
 export { ApiError } from "./errors.js";
+export { issueApiKey, DEFAULT_SCOPES, UnknownTenantError } from "./issue.js";
+export type { IssuedApiKey } from "./issue.js";
 export { RateLimiter } from "./rate-limit.js";
 
 /**

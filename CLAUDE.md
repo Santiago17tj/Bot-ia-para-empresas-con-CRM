@@ -25,7 +25,7 @@ npm install
 npm run db:up                  # Postgres 17 + pgvector en el puerto 5433
 npm run setup -w @platform/db  # migraciones + SQL crudo (vector, tsvector, RLS)
 npm run prompts:seed           # carga el catálogo de prompts en el registro
-npm test                       # 408 tests
+npm test                       # 409 tests
 ```
 
 **`setup` y NO `db:migrate`.** `prisma migrate dev` detecta como deriva las
@@ -34,7 +34,7 @@ resetear la base. Decir que sí borra los datos de desarrollo. `setup` es
 `migrate deploy` + el SQL crudo, que es lo correcto aquí y lo que usa CI.
 
 Esta secuencia está **verificada contra un checkout limpio y un Postgres
-vacío**, no solo escrita: desde cero hasta los 408 tests en verde.
+vacío**, no solo escrita: desde cero hasta los 409 tests en verde.
 
 Ese «checkout limpio» hay que decirlo aparte, porque durante doce ejecuciones de
 CI la secuencia estuvo rota y en local no se notaba. `apply-sql.ts` importa
@@ -134,7 +134,7 @@ el chat da continuidad entre turnos.
 | `secrets` | Cifrado en reposo AES-256-GCM, llavero, redacción | 17 |
 | `connectors` | Web, Notion, **Drive**, SSRF, cron con **zona horaria** | 107 |
 | `apps/api` | Fastify, API key → tenant, `/v1/knowledge/*`, `/v1/sources`, `/v1/chat`, `/v1/contacts` | 39 int. |
-| `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador | 30 int. |
+| `apps/worker` | Outbox, ingesta, huecos, sincronización, planificador, **humo** | 31 int. |
 | `apps/panel` | **Panel de operación**: proxy con sesión cifrada, 3 pantallas | 9 int. |
 
 El arnés corrió en modo `full` contra un generador real y la puerta PASA (ver
@@ -488,7 +488,7 @@ integración se bloquean entre ellos y fallan por algo que no es el código.
 `.github/workflows/ci.yml`, dos jobs:
 
 - **Tests** — Postgres 17 + pgvector como servicio, con los MISMOS argumentos de
-  ICU que `docker-compose.yml`. Ejecuta los 408 tests, integración incluida:
+  ICU que `docker-compose.yml`. Ejecuta los 409 tests, integración incluida:
   con `DATABASE_URL` puesta dejan de saltarse, y ahí están los que importan.
 - **Arnés** — corre `npm run eval` y bloquea si la puerta bloquea. Necesita el
   secreto `GROQ_API_KEY`; **sin él el job avisa y no mide**, que es honesto pero
@@ -500,6 +500,37 @@ base. Ver el apartado de migraciones.
 
 La secuencia entera está verificada contra una base vacía en un contenedor
 aparte, no solo escrita.
+
+### El test de humo
+
+`apps/worker/test/humo.integration.test.ts`: el producto entero una vez, como lo
+vive un cliente. Credencial → subir documento → indexar → respuesta con cita
+validada → abstención en la trampa → el hueco aparece en la lista.
+
+**Existe porque este repositorio tenía cuatrocientos tests de piezas y ninguno
+del producto.** En una sola sesión aparecieron cuatro cosas que la documentación
+daba por funcionando y no funcionaban: la CI llevaba doce ejecuciones sin pasar,
+`issue-key` nunca emitió una credencial, ni el consumo ni los huecos se
+registraban desde la API, y el agrupador de huecos no agrupa ni preguntas
+idénticas. Las cuatro salieron de EJECUTAR el sistema, ninguna de leerlo. Tres
+de las cuatro las habría cazado este fichero.
+
+Con generador falso a propósito: aquí se mide la fontanería, no la calidad del
+modelo — eso es `npm run eval`, con puerta y contra uno real. Un test de humo
+lento, caro y no determinista no lo mira nadie.
+
+Dos detalles que costaron y no son obvios:
+
+- **`dispatcher.on` lleva tres argumentos** (tipo, nombre, consumidor). Con dos,
+  el consumidor se registra como nombre y el fallo es `handler.handle is not a
+  function` dentro del despachador.
+- **Al despachador hay que pasarle `onError`.** Sin él, un consumidor que falla
+  lo hace en silencio y el test solo dice "el documento sigue en PENDING", que
+  es el mismo modo de fallo que este test existe para no repetir.
+
+La lógica de emitir credenciales se sacó del script a `issueApiKey` en
+`@platform/api`. Mientras vivió dentro de `scripts/issue-key.ts` ningún test la
+tocaba, y estuvo rota desde el primer día.
 
 ### La CI nunca había pasado
 
