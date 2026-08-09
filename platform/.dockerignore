@@ -1,0 +1,34 @@
+# Lo que NO entra en la imagen.
+#
+# El primero de la lista es el que importa: `.env` tiene la clave de cifrado de
+# secretos y la del proveedor de IA. Una imagen es un artefacto que se sube a un
+# registro y se comparte; una credencial dentro viaja con ella y no se puede
+# retirar. Las variables se pasan al contenedor en tiempo de ejecución.
+.env
+.env.*
+!.env.example
+
+# node_modules del host es de Windows: sus binarios nativos —el motor de
+# consultas de Prisma, ONNX— no funcionan en Linux. Copiarlo además rompería el
+# `npm ci` de dentro, que es quien tiene que resolver las plataformas correctas.
+node_modules
+**/node_modules
+
+# Lo compila el builder. Copiar el `dist/` del host es la forma de desplegar algo
+# distinto de lo que hay en git sin enterarse.
+dist
+**/dist
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Cliente de Prisma generado: se regenera dentro con el motor de Linux.
+packages/db/generated
+
+# Ficheros que la aplicación escribe, no que necesita.
+.storage
+**/.storage
+
+.git
+.github
+**/test
+**/*.test.ts

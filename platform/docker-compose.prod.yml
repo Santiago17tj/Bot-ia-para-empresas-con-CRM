@@ -1,0 +1,151 @@
+# El producto entero, levantado con un comando.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Hasta aquí, enseñarle esto a alguien exigía tres terminales y una clave emitida
+# a mano. Fichero aparte del `docker-compose.yml` de desarrollo a propósito: ese
+# levanta SOLO Postgres, porque en desarrollo las aplicaciones se ejecutan fuera
+# del contenedor para poder recargarlas. Mezclarlos daría un fichero con la mitad
+# de los servicios comentados.
+#
+# Las variables sensibles se interpolan desde `platform/.env`, que compose lee
+# solo. No se copian a la imagen: ver `.dockerignore`.
+
+name: enterprise-ai-os
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: enterprise-ai-os:local
+  restart: unless-stopped
+  environment: &app-env
+    # Dentro de la red de compose el host es `postgres` y el puerto el 5432. El
+    # 5433 de la documentación es el del host, para no chocar con otro Postgres
+    # ya instalado; aquí dentro no aplica.
+    DATABASE_URL: postgresql://platform:platform@postgres:5432/platform?schema=public
+    DATABASE_URL_APP: postgresql://platform_app:platform_app@postgres:5432/platform?schema=public
+
+    # La aplicación NO se conecta como propietario de las tablas: un propietario
+    # se salta RLS por defecto, así que hacerlo desactivaría la tercera capa de
+    # aislamiento sin que nada lo indicara. `DATABASE_URL` se reserva a
+    # migraciones, `DATABASE_URL_APP` es la del rol `platform_app`, NOBYPASSRLS.
+
+    EMBEDDING_PROVIDER: local
+    EMBEDDING_MODEL: Xenova/multilingual-e5-small
+    EMBEDDING_DIMENSIONS: "384"
+
+    STORAGE_DRIVER: local
+    STORAGE_LOCAL_PATH: /data/storage
+
+    # Sin esto la API responde 503 al guardar el token de un conector, en vez de
+    # guardarlo en claro. Se genera con:
+    #   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+    SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?falta SECRETS_ENCRYPTION_KEY en platform/.env}
+
+    # El generador. Sin clave, la búsqueda y la ingesta funcionan igual: lo que
+    # deja de haber es respuesta generada, y la API lo dice.
+    AI_PROVIDER: ${AI_PROVIDER:-groq}
+    GROQ_API_KEY: ${GROQ_API_KEY:-}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    AI_BASE_URL: ${AI_BASE_URL:-}
+    AI_TIMEOUT_MS: ${AI_TIMEOUT_MS:-}
+
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+    NODE_ENV: production
+  volumes:
+    # El MISMO volumen en la API y en el worker, y no es un detalle: la API
+    # guarda los bytes del fichero y el worker los lee para indexarlos. Con dos
+    # volúmenes distintos, cada documento subido acabaría en FAILED con "no se
+    # pudieron leer los bytes" y el fallo parecería del conversor.
+    - platform-storage:/data/storage
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      POSTGRES_DB: platform
+      # Los MISMOS argumentos de ICU que en desarrollo y que en CI. Una locale
+      # distinta hace que un ORDER BY con eñes se comporte de otra forma aquí y
+      # allí, y eso se descubre en producción.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=es-ES --locale=C.UTF-8"
+    volumes:
+      - platform-pgdata-prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Migraciones y catálogo de prompts. Corre una vez y termina.
+  #
+  # Es un servicio y no un paso dentro del arranque de la API porque son varios
+  # procesos: si cada uno migrara al arrancar, tres contenedores competirían por
+  # aplicar la misma migración. Aquí lo hace uno, y los demás esperan a que
+  # termine BIEN — `service_completed_successfully`, no `service_started`.
+  migrate:
+    <<: *app
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # `setup` y NO `db:migrate`: `prisma migrate dev` interpreta como deriva las
+    # columnas que añade el SQL crudo —vectores, tsvector, políticas RLS— y
+    # ofrecería resetear la base. En producción eso es un desastre silencioso.
+    #
+    # `seed-prompts` del workspace y no `npm run prompts:seed` de la raíz, que
+    # recompila: aquí el `dist` ya viene construido de la imagen.
+    command: >
+      sh -c "npm run setup -w @platform/db &&
+             npm run seed-prompts -w @platform/observability"
+
+  api:
+    <<: *app
+    environment:
+      <<: *app-env
+      PORT: "3001"
+    ports:
+      - "${API_PORT:-3001}:3001"
+    command: node apps/api/dist/index.js
+    healthcheck:
+      # `/v1/health` consulta la base: un health que solo dice que el proceso
+      # vive miente cuando Postgres está caído.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # Proceso aparte de la API, y no por gusto: el proveedor de embeddings local
+  # corre ONNX en CPU y BLOQUEA el event loop durante segundos. Dentro de la API,
+  # ingerir un manual dejaría al servidor sin responder a nadie.
+  worker:
+    <<: *app
+    command: node apps/worker/dist/index.js
+
+  panel:
+    <<: *app
+    environment:
+      <<: *app-env
+      PANEL_PORT: "3002"
+      # Por el nombre del servicio, no por localhost: dentro de su contenedor,
+      # `localhost` es el propio panel.
+      PANEL_API_URL: http://api:3001
+    ports:
+      - "${PANEL_PORT:-3002}:3002"
+    command: node apps/panel/dist/index.js
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+
+volumes:
+  platform-pgdata-prod:
+  platform-storage:

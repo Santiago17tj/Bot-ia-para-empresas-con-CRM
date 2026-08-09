@@ -118,6 +118,31 @@ El worker es un proceso aparte a propósito: el proveedor de embeddings local
 corre ONNX en CPU y **bloquea el event loop**. Dentro de la API, ingerir un
 manual dejaría al servidor sin responder a nadie.
 
+## Levantarlo entero
+
+Un comando, con Postgres, migraciones, API, worker y panel:
+
+```bash
+npm run deploy:up
+```
+
+Necesita `SECRETS_ENCRYPTION_KEY` en `platform/.env` —compose la lee de ahí y
+falla diciéndolo si no está— y una `GROQ_API_KEY` si quieres respuesta generada.
+El panel queda en `http://localhost:3002` y la API en el `3001`.
+
+La imagen es una sola para los tres procesos, que se distinguen por el comando:
+es un monorepo y separarlas significaría compilar tres veces lo mismo. Trae el
+modelo de embeddings **dentro** (465 MB), de forma que la primera ingesta no se
+queda bajando nada y el despliegue on-premise funciona sin salida a internet.
+Eso la deja en 2,81 GB, que es el precio de ser autocontenida.
+
+Las migraciones las aplica un servicio de un solo uso que corre antes que nadie:
+si cada proceso migrara al arrancar, tres contenedores competirían por aplicar la
+misma migración. Los demás esperan a que termine **bien**, no a que arranque.
+
+Verificado ejecutándolo desde una base vacía: subir un documento → el worker lo
+indexa → responde con su cita validada.
+
 ## El panel
 
 Tres pantallas —subir documentos, preguntar con citas, ver los huecos— en

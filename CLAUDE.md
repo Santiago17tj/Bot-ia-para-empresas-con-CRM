@@ -909,6 +909,50 @@ para que un cliente pueda ramificar sin leer el texto en español; uno que
 siempre vale lo mismo no es cosmético, es el campo entero sin servir para nada.
 Arreglado comprobando `instanceof ApiError` antes de normalizar.
 
+## El despliegue
+
+`npm run deploy:up` levanta el producto entero: Postgres, migraciones, API,
+worker y panel. Hasta ahora enseñárselo a alguien exigía tres terminales.
+
+**Una sola imagen para los tres procesos**, que se distinguen por el comando. Es
+un monorepo con workspaces: tres imágenes significarían compilar tres veces lo
+mismo y mantener tres ficheros que se desincronizan en cuanto alguien añada una
+dependencia. Lo que separa a los procesos no es el código que llevan dentro.
+
+**`-slim` y no `-alpine`.** Prisma y ONNX traen binarios nativos compilados
+contra glibc; en musl, Prisma exige otro motor y ONNX no arranca — y el síntoma
+aparece en la primera petición, no al construir.
+
+**El modelo de embeddings va DENTRO de la imagen.** Se descarga de HuggingFace
+en la primera llamada, así que sin precargarlo la primera ingesta de un cliente
+se queda parada bajando 450 MB, y en on-premise sin internet no funciona nunca —
+que es justo uno de los caminos que el adaptador de proveedores existe para
+servir. El precio, medido: la imagen pesa **2,81 GB**.
+
+**Las migraciones son un servicio de un solo uso.** Si cada proceso migrara al
+arrancar, tres contenedores competirían por aplicar la misma migración. Los
+demás esperan con `service_completed_successfully`, no `service_started`: lo que
+importa no es que arrancara, es que terminara bien.
+
+**API y worker comparten el volumen de almacenamiento**, y no es un detalle: la
+API guarda los bytes del fichero y el worker los lee para indexarlo. Con dos
+volúmenes distintos, cada documento acabaría en `FAILED` con "no se pudieron
+leer los bytes" y el fallo parecería del conversor.
+
+**El `.env` no entra en la imagen.** Es lo primero del `.dockerignore`: una
+imagen se sube a un registro y una credencial dentro viaja con ella y no se
+puede retirar. Las variables se pasan en tiempo de ejecución, y compose las
+interpola desde `platform/.env`.
+
+Dentro de la red de compose el host de Postgres es `postgres:5432` y el de la
+API es `api:3001`. El 5433 de la documentación es del host, para no chocar con
+otro Postgres instalado; ahí dentro no aplica. Y el panel apunta a `api:3001`
+por el NOMBRE del servicio: dentro de su contenedor, `localhost` es el panel.
+
+Verificado ejecutándolo contra una base vacía, no solo escrito: migraciones y
+prompts aplicados, credencial emitida desde dentro del contenedor, documento
+subido → indexado por el worker → respondido con su cita validada contra Groq.
+
 ## El panel
 
 `apps/panel`, en `npm run panel` (puerto 3002). Tres pantallas: subir un
